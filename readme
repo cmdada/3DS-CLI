@@ -1,0 +1,23 @@
+3DSSH
+
+A Nintendo 3DS homebrew application that embeds a full RISC-V CPU emulator (`mini-rv32ima` by cnlohr) to boot a real Linux environment inside the 3DS Horizon OS.
+
+Features a custom bottom-screen touch keyboard and standard VT100 console output on the top screen.
+
+Installation
+
+1. SD Card Prep: You must copy the `Image` file (which contains the pre-compiled Linux kernel and Buildroot rootfs) to the root of your 3DS SD card. 
+   - Path: `sdmc:/Image`
+2. Launch: Launch 3DSSH using the Homebrew Launcher.
+3. Boot: The emulator will automatically allocate RAM and begin booting Linux. Because it relies on software emulation on the 3DS ARM processor, the boot process is slow, on my sdxc card it takes about 172 seconds to get to the login prompt. 
+4. Login: Once the boot finishes, you will be prompted for a login.
+   - Username: `root`
+   - Password: *(Leave blank)*
+
+Usage
+- Bottom Screen: Custom touch keyboard, you can probably tell I'm not UX :3
+- START Button: Hard exit the emulator and return to the Homebrew Launcher.
+
+Credits
+- Built using [devkitARM / libctru](https://github.com/devkitPro/libctru).
+- Powered by the incredible [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) RISC-V emulator by cnlohr.

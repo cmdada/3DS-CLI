@@ -31,9 +31,9 @@ include $(DEVKITARM)/3ds_rules
 #     - icon.png
 #     - <libctru folder>/default_icon.png
 #---------------------------------------------------------------------------------
-TARGET		:=	3dssh
-APP_TITLE		:=	3DSSH
-APP_DESCRIPTION	:=	Embedded Linux Emulator
+TARGET		:=	3ds-cli
+APP_TITLE		:=	3DS-CLI
+APP_DESCRIPTION	:=	Linux Environment for 3DS
 APP_AUTHOR		:=	cmdada
 BUILD		:=	build
 SOURCES		:=	source

@@ -24,7 +24,7 @@ void draw_keyboard() {
   printf("\x1b[2J"); // Clear screen
 
   printf("\x1b[1;1H");
-  printf("--- 3dssh by cmdada (https://adabit.org) ---\n");
+  printf("3ds-cli by cmdada (https://adabit.org)\n");
   printf("running mini-rv32ima image,login as root\n");
   printf("Tap the bottom screen to type.\n");
   printf("Press START to exit.\n\n");
@@ -169,9 +169,9 @@ int main(int argc, char **argv) {
   draw_keyboard();
 
   consoleSelect(&topScreen);
-  printf("\x1b[2J\x1b[1;1H");
-  printf("Welcome to 3DSSH Linux Emulator\n");
-
+  printf("\x1b[2J");
+  printf("Welcome to 3DS-CLI Linux Emulator\n");
+  printf("Initializing mini-rv32ima...\n");
   ram_image = malloc(ram_amt);
   if (!ram_image) {
     printf("Failed to allocate %lu bytes for RAM.\n", ram_amt);

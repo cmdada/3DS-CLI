@@ -1,0 +1,16 @@
+# Build outputs
+build/
+*.3dsx
+*.smdh
+*.elf
+
+# Old branding
+3dssh.json
+
+# Editor / IDE
+.vscode/
+.clangd
+
+# OS junk
+.DS_Store
+Thumbs.db

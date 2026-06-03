@@ -23,7 +23,7 @@ jobs:
 
       - name: Set release variables
         id: vars
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: echo "short_sha=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Package release asset
         run: |

@@ -274,14 +274,16 @@ uint8_t *ram_image = 0;
 struct MiniRV32IMAState *core;
 
 #define TICKS_PER_US 268
-#define EMU_FRAME_BUDGET_US 15000
-#define EMU_STEP_CHUNK 50000
+#define EMU_RUN_BUDGET_US 50000
+#define EMU_STEP_CHUNK 200000
+#define TOP_REFRESH_INTERVAL_US 33000
 
 char rx_buf[256];
 int rx_head = 0, rx_tail = 0;
 
-static char tx_buf[2048];
+static char tx_buf[8192];
 static int tx_len = 0;
+static bool top_dirty = false;
 
 static int IsKBHit() { return rx_head != rx_tail; }
 static int ReadKBByte() {
@@ -296,16 +298,29 @@ static void rx_push(char c) {
 }
 static void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
 
-static void FlushUART(void) {
-  if (!tx_len) return;
+static bool FlushUART(void) {
+  if (!tx_len) return false;
   consoleSelect(&topScreen);
   fwrite(tx_buf, 1, tx_len, stdout);
   tx_len = 0;
+  top_dirty = true;
+  return true;
 }
 
 static void WriteUARTByte(char c) {
   tx_buf[tx_len++] = c;
   if (tx_len == (int)sizeof(tx_buf)) FlushUART();
+}
+
+static bool TimeSinceUs(uint64_t last_tick, uint64_t interval_us) {
+  return svcGetSystemTick() - last_tick >= interval_us * TICKS_PER_US;
+}
+
+static void PresentTopScreen(uint64_t *last_present_tick) {
+  gfxFlushBuffers();
+  gfxSwapBuffers();
+  *last_present_tick = svcGetSystemTick();
+  top_dirty = false;
 }
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
@@ -346,6 +361,7 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno) { return 0; }
 
 int main(int argc, char **argv) {
   gfxInitDefault();
+  osSetSpeedupEnable(true);
   gfxSetDoubleBuffering(GFX_BOTTOM, false);
   consoleInit(GFX_TOP, &topScreen);
   // Bottom screen: direct framebuffer (no consoleInit)
@@ -356,6 +372,10 @@ int main(int argc, char **argv) {
   printf("\x1b[2J");
   printf("Welcome to 3DS-CLI Linux Emulator\n");
   printf("Initializing mini-rv32ima...\n");
+  top_dirty = true;
+  uint64_t last_present_tick = 0;
+  PresentTopScreen(&last_present_tick);
+
   ram_image = malloc(ram_amt);
   if (!ram_image) {
     printf("Failed to allocate %lu bytes for RAM.\n", ram_amt);
@@ -396,6 +416,8 @@ int main(int argc, char **argv) {
   core->extraflags |= 3;
 
   printf("Booting Linux... This may take a while.\n");
+  top_dirty = true;
+  PresentTopScreen(&last_present_tick);
 
   bool touch_held = false;
   uint64_t last_tick = svcGetSystemTick();
@@ -482,16 +504,26 @@ int main(int argc, char **argv) {
     } while (ret != 1 &&
              ret != 0x5555 &&
              ret != 3 &&
-             svcGetSystemTick() - frame_start < (uint64_t)EMU_FRAME_BUDGET_US * TICKS_PER_US);
+             svcGetSystemTick() - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
 
-    FlushUART();
     if (ret == 0x5555 || ret == 3) {
       if (ret == 3) printf("Emulator fault!\n");
+      FlushUART();
+      top_dirty = true;
+      PresentTopScreen(&last_present_tick);
       break;
     }
-    gfxFlushBuffers();
-    gfxSwapBuffers();
-    gspWaitForVBlank();
+
+    if (ret == 1 || TimeSinceUs(last_present_tick, TOP_REFRESH_INTERVAL_US)) {
+      FlushUART();
+      if (top_dirty) {
+        PresentTopScreen(&last_present_tick);
+      }
+    }
+
+    if (ret == 1) {
+      svcSleepThread(1000000LL);
+    }
   }
 
   free(ram_image);

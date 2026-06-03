@@ -273,8 +273,15 @@ uint32_t ram_amt = 32 * 1024 * 1024;
 uint8_t *ram_image = 0;
 struct MiniRV32IMAState *core;
 
+#define TICKS_PER_US 268
+#define EMU_FRAME_BUDGET_US 15000
+#define EMU_STEP_CHUNK 50000
+
 char rx_buf[256];
 int rx_head = 0, rx_tail = 0;
+
+static char tx_buf[2048];
+static int tx_len = 0;
 
 static int IsKBHit() { return rx_head != rx_tail; }
 static int ReadKBByte() {
@@ -288,6 +295,18 @@ static void rx_push(char c) {
   if (nh != rx_tail) { rx_buf[rx_head] = c; rx_head = nh; }
 }
 static void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
+
+static void FlushUART(void) {
+  if (!tx_len) return;
+  consoleSelect(&topScreen);
+  fwrite(tx_buf, 1, tx_len, stdout);
+  tx_len = 0;
+}
+
+static void WriteUARTByte(char c) {
+  tx_buf[tx_len++] = c;
+  if (tx_len == (int)sizeof(tx_buf)) FlushUART();
+}
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
 static uint32_t HandleControlStore(uint32_t addy, uint32_t val);
@@ -309,7 +328,7 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval) { return retval; }
 static uint32_t HandleControlStore(uint32_t addy, uint32_t val) {
-  if (addy == 0x10000000) { consoleSelect(&topScreen); printf("%c", (int)val); }
+  if (addy == 0x10000000) WriteUARTByte((char)val);
   else if (addy == 0x11004004) core->timermatchh = val;
   else if (addy == 0x11004000) core->timermatchl = val;
   else if (addy == 0x11100000) { core->pc += 4; return val; }
@@ -382,6 +401,8 @@ int main(int argc, char **argv) {
   uint64_t last_tick = svcGetSystemTick();
 
   while (aptMainLoop()) {
+    int ret = 0;
+
     hidScanInput();
     u32 kDown = hidKeysDown();
     u32 kHeld = hidKeysHeld();
@@ -451,9 +472,19 @@ int main(int argc, char **argv) {
 
     // Emulator steps
     uint64_t cur = svcGetSystemTick();
-    uint32_t us = (cur - last_tick) / 268;
+    uint32_t us = (cur - last_tick) / TICKS_PER_US;
     last_tick = cur;
-    int ret = MiniRV32IMAStep(core, ram_image, 0, us, 10000);
+    uint64_t frame_start = cur;
+    uint32_t elapsed_us = us;
+    do {
+      ret = MiniRV32IMAStep(core, ram_image, 0, elapsed_us, EMU_STEP_CHUNK);
+      elapsed_us = 0;
+    } while (ret != 1 &&
+             ret != 0x5555 &&
+             ret != 3 &&
+             svcGetSystemTick() - frame_start < (uint64_t)EMU_FRAME_BUDGET_US * TICKS_PER_US);
+
+    FlushUART();
     if (ret == 0x5555 || ret == 3) {
       if (ret == 3) printf("Emulator fault!\n");
       break;

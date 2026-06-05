@@ -3,9 +3,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include "draw.h"
+#include "terminal.h"
 
-PrintConsole topScreen;
+TermState term_state;
+
+static void term_printf(const char *format, ...) {
+  char buf[512];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buf, sizeof(buf), format, args);
+  va_end(args);
+  
+  char *s = buf;
+  while (*s) {
+    term_write_char(&term_state, *s++);
+  }
+}
 
 // Special key codes
 #define K_SHIFT 1
@@ -281,10 +296,6 @@ struct MiniRV32IMAState *core;
 char rx_buf[256];
 int rx_head = 0, rx_tail = 0;
 
-static char tx_buf[8192];
-static int tx_len = 0;
-static bool top_dirty = false;
-
 static int IsKBHit() { return rx_head != rx_tail; }
 static int ReadKBByte() {
   if (rx_head == rx_tail) return -1;
@@ -298,18 +309,9 @@ static void rx_push(char c) {
 }
 static void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
 
-static bool FlushUART(void) {
-  if (!tx_len) return false;
-  consoleSelect(&topScreen);
-  fwrite(tx_buf, 1, tx_len, stdout);
-  tx_len = 0;
-  top_dirty = true;
-  return true;
-}
-
 static void WriteUARTByte(char c) {
-  tx_buf[tx_len++] = c;
-  if (tx_len == (int)sizeof(tx_buf)) FlushUART();
+  term_state.auto_track = true;
+  term_write_char(&term_state, c);
 }
 
 static bool TimeSinceUs(uint64_t last_tick, uint64_t interval_us) {
@@ -317,10 +319,12 @@ static bool TimeSinceUs(uint64_t last_tick, uint64_t interval_us) {
 }
 
 static void PresentTopScreen(uint64_t *last_present_tick) {
+  u8 *top_fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+  term_draw(&term_state, top_fb);
   gfxFlushBuffers();
   gfxSwapBuffers();
   *last_present_tick = svcGetSystemTick();
-  top_dirty = false;
+  term_state.dirty = false;
 }
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
@@ -363,30 +367,30 @@ int main(int argc, char **argv) {
   gfxInitDefault();
   osSetSpeedupEnable(true);
   gfxSetDoubleBuffering(GFX_BOTTOM, false);
-  consoleInit(GFX_TOP, &topScreen);
+
+  term_init(&term_state);
   // Bottom screen: direct framebuffer (no consoleInit)
 
   draw_keyboard();
 
-  consoleSelect(&topScreen);
-  printf("\x1b[2J");
-  printf("Welcome to 3DS-CLI Linux Emulator\n");
-  printf("Initializing mini-rv32ima...\n");
-  top_dirty = true;
+  term_printf("\x1b[2J");
+  term_printf("Welcome to 3DS-CLI Linux Emulator\n");
+  term_printf("Initializing mini-rv32ima...\n");
+  term_state.dirty = true;
   uint64_t last_present_tick = 0;
   PresentTopScreen(&last_present_tick);
 
   ram_image = malloc(ram_amt);
   if (!ram_image) {
-    printf("Failed to allocate %lu bytes for RAM.\n", ram_amt);
+    term_printf("Failed to allocate %lu bytes for RAM.\n", ram_amt);
     goto wait_exit;
   }
 
   FILE *f = fopen("sdmc:/Image", "rb");
   if (!f) f = fopen("Image", "rb");
   if (!f) {
-    printf("Error: Could not open 'sdmc:/Image'.\n");
-    printf("Please copy the Image file to your SD card.\n");
+    term_printf("Error: Could not open 'sdmc:/Image'.\n");
+    term_printf("Please copy the Image file to your SD card.\n");
     goto wait_exit;
   }
 
@@ -394,7 +398,7 @@ int main(int argc, char **argv) {
   long flen = ftell(f);
   fseek(f, 0, SEEK_SET);
   if (flen > ram_amt - 4*1024*1024) {
-    printf("Image too large for RAM.\n");
+    term_printf("Image too large for RAM.\n");
     fclose(f); goto wait_exit;
   }
   memset(ram_image, 0, ram_amt);
@@ -415,8 +419,8 @@ int main(int argc, char **argv) {
   core->regs[11] = dtb_ptr ? (dtb_ptr + MINIRV32_RAM_IMAGE_OFFSET) : 0;
   core->extraflags |= 3;
 
-  printf("Booting Linux... This may take a while.\n");
-  top_dirty = true;
+  term_printf("Booting Linux... This may take a while.\n");
+  term_state.dirty = true;
   PresentTopScreen(&last_present_tick);
 
   bool touch_held = false;
@@ -429,6 +433,70 @@ int main(int argc, char **argv) {
     u32 kDown = hidKeysDown();
     u32 kHeld = hidKeysHeld();
     if (kDown & KEY_START) break;
+
+    // Zoom controls (L/Y = zoom out, R/X = zoom in, always both axes equally)
+    if (kDown & KEY_L || kDown & KEY_Y) {
+      int z = (term_state.zoom_x > 1) ? term_state.zoom_x - 1 : 1;
+      term_state.zoom_x = z;
+      term_state.zoom_y = z;
+      term_state.dirty = true;
+    }
+    if (kDown & KEY_R || kDown & KEY_X) {
+      int z = (term_state.zoom_x < 5) ? term_state.zoom_x + 1 : 5;
+      term_state.zoom_x = z;
+      term_state.zoom_y = z;
+      term_state.dirty = true;
+    }
+    if (kDown & KEY_ZL) {
+      term_state.auto_track = !term_state.auto_track;
+      term_state.dirty = true;
+    }
+    if (kDown & KEY_ZR) {
+      term_state.use_5x7 = !term_state.use_5x7;
+      term_state.dirty = true;
+    }
+
+    // Viewport panning with Circle Pad
+    static int pan_cooldown_x = 0;
+    static int pan_cooldown_y = 0;
+    circlePosition cpos;
+    hidCircleRead(&cpos);
+
+    if (abs(cpos.dx) > 40) {
+      term_state.auto_track = false;
+      if (pan_cooldown_x <= 0) {
+        if (cpos.dx > 40) term_state.scroll_x++;
+        else if (cpos.dx < -40) term_state.scroll_x--;
+        pan_cooldown_x = 4;
+        term_state.dirty = true;
+      } else {
+        pan_cooldown_x--;
+      }
+    } else {
+      pan_cooldown_x = 0;
+    }
+
+    if (abs(cpos.dy) > 40) {
+      term_state.auto_track = false;
+      if (pan_cooldown_y <= 0) {
+        if (cpos.dy > 40) term_state.scroll_y--;
+        else if (cpos.dy < -40) term_state.scroll_y++;
+        pan_cooldown_y = 4;
+        term_state.dirty = true;
+      } else {
+        pan_cooldown_y--;
+      }
+    } else {
+      pan_cooldown_y = 0;
+    }
+
+    // Cursor blink check
+    static bool last_blink_on = false;
+    bool blink_on = (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
+    if (blink_on != last_blink_on) {
+      term_state.dirty = true;
+      last_blink_on = blink_on;
+    }
 
     // D-pad arrows
     if (kDown & KEY_DUP)    rx_push_str("\x1b[A");
@@ -507,16 +575,14 @@ int main(int argc, char **argv) {
              svcGetSystemTick() - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
 
     if (ret == 0x5555 || ret == 3) {
-      if (ret == 3) printf("Emulator fault!\n");
-      FlushUART();
-      top_dirty = true;
+      if (ret == 3) term_printf("Emulator fault!\n");
+      term_state.dirty = true;
       PresentTopScreen(&last_present_tick);
       break;
     }
 
     if (ret == 1 || TimeSinceUs(last_present_tick, TOP_REFRESH_INTERVAL_US)) {
-      FlushUART();
-      if (top_dirty) {
+      if (term_state.dirty) {
         PresentTopScreen(&last_present_tick);
       }
     }
@@ -534,6 +600,8 @@ wait_exit:
   while (aptMainLoop()) {
     hidScanInput();
     if (hidKeysDown() & KEY_START) break;
+    u8 *top_fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+    term_draw(&term_state, top_fb);
     gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
   }
   free(ram_image);

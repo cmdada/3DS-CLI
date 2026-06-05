@@ -11,7 +11,7 @@ card while still running inside the normal 3DS Horizon OS.
 ## What it does
 
 - Boots a RISC-V Linux image on 3DS hardware through software emulation.
-- Displays standard VT100-style terminal output on the top screen.
+- Displays a custom ANSI/xterm terminal emulator on the top screen with full 16/256/24-bit colour support, zoom, and viewport panning.
 - Provides a custom bottom-screen touch keyboard for typing commands.
 - Includes a prebuilt image with BusyBox tools, a JavaScript runtime, and CLI Doom.
 - Can be used as a starting point for testing custom RISC-V Linux images, kernels,
@@ -33,8 +33,27 @@ Install directly on your 3DS via [Universal Updater](https://db.universal-team.n
 
 ## Controls
 
-- Bottom screen: touch keyboard
-- START: exit the emulator and return to the Homebrew Launcher
+| Button | Action |
+|---|---|
+| **L** or **Y** | Zoom out |
+| **R** or **X** | Zoom in |
+| **ZL** | Toggle auto-follow cursor on/off |
+| **ZR** | Toggle font (8x8 ↔ 5x7 compact) |
+| **Circle Pad** | Pan viewport (also disables auto-follow) |
+| **D-Pad** | Send arrow keys to Linux |
+| **START** | Quit and return to Homebrew Launcher |
+
+| Key | Action |
+|---|---|
+| **SHF** | Toggle shift (uppercase) |
+| **?#1** | Switch to symbol layer 1 |
+| **#+=** | Switch to symbol layer 2 |
+| **ABC** | Return to alphabetic layer |
+| **CTL** | Ctrl modifier — tap CTL, then tap a letter for Ctrl+key |
+| **TAB** | Send tab |
+| **ESC** | Send escape |
+| **ENT** | Send enter |
+| **DEL** | Send backspace |
 
 ## Building
 

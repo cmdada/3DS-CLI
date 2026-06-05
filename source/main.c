@@ -160,9 +160,7 @@ void draw_keyboard() {
     fb_string(8, 21, "CTRL", 255, 255, 255, 1);
     fb_string(60, 21, "tap a key...", CLR_TXTD_R, CLR_TXTD_G, CLR_TXTD_B, 1);
   } else {
-    fb_string(4, 21, "D-pad=arrows  START=quit", CLR_TXTD_R, CLR_TXTD_G, CLR_TXTD_B, 1);
   }
-  fb_string(220, 21, "root@3ds", 80, 180, 120, 1);
 
   // Separator line
   fb_hline(0, 40, 320, 45, 45, 55);
@@ -269,12 +267,6 @@ void draw_keyboard() {
   draw_key_at(r4, 9, 0, "DEL", 0,
     CLR_DEL_R,CLR_DEL_G,CLR_DEL_B, CLR_DEL_R+15,CLR_DEL_G+10,CLR_DEL_B+10,
     CLR_DEL_R-12,CLR_DEL_G-8,CLR_DEL_B-8, 255,200,200, 1);
-
-  // Bottom bar: D-pad hint
-  fb_string(4, 230, "D-pad", 60, 60, 70, 1);
-  fb_string(48, 230, "arrows", 80, 140, 180, 1);
-  fb_string(240, 230, "START", 60, 60, 70, 1);
-  fb_string(284, 230, "quit", 180, 80, 80, 1);
 
   gfxFlushBuffers();
 }
@@ -449,6 +441,7 @@ int main(int argc, char **argv) {
     }
     if (kDown & KEY_ZL) {
       term_state.auto_track = !term_state.auto_track;
+      if (term_state.auto_track) term_state.scroll_y = 0; // snap back to live
       term_state.dirty = true;
     }
     if (kDown & KEY_ZR) {

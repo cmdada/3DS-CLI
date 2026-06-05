@@ -10,6 +10,7 @@
 
 #define TERM_COLS 80
 #define TERM_ROWS 30
+#define TERM_SCROLLBACK 200
 
 #define TERM_FLAG_BOLD      (1 << 0)
 #define TERM_FLAG_DIM       (1 << 1)
@@ -31,6 +32,11 @@ typedef struct {
 
 typedef struct {
   TermCell grid[TERM_COLS * TERM_ROWS];
+
+  TermCell sb_buf[TERM_SCROLLBACK][TERM_COLS];
+  int sb_head; 
+  int sb_count;  
+
   int cx, cy;
   int saved_cx, saved_cy;
   u32 cur_fg;
@@ -91,11 +97,20 @@ static inline u32 xterm_256_to_rgb(u8 index) {
 
 static inline void term_scroll_up(TermState *ts, int top, int bottom) {
   if (top < 0 || bottom >= TERM_ROWS || top >= bottom) return;
-  // Move rows top+1..bottom up by 1
+
+  if (top == 0) {
+    int slot = (ts->sb_head + ts->sb_count) % TERM_SCROLLBACK;
+    memcpy(ts->sb_buf[slot], &ts->grid[top * TERM_COLS], TERM_COLS * sizeof(TermCell));
+    if (ts->sb_count < TERM_SCROLLBACK) {
+      ts->sb_count++;
+    } else {
+      ts->sb_head = (ts->sb_head + 1) % TERM_SCROLLBACK;
+    }
+  }
+
   for (int y = top; y < bottom; y++) {
     memcpy(&ts->grid[y * TERM_COLS], &ts->grid[(y + 1) * TERM_COLS], TERM_COLS * sizeof(TermCell));
   }
-  // Clear bottom row
   TermCell clear_cell = { ts->default_fg, ts->default_bg, ' ', 0 };
   for (int x = 0; x < TERM_COLS; x++) {
     ts->grid[bottom * TERM_COLS + x] = clear_cell;
@@ -116,6 +131,10 @@ static inline void term_init(TermState *ts) {
 
   ts->scroll_top = 0;
   ts->scroll_bottom = TERM_ROWS - 1;
+
+  ts->sb_head  = 0;
+  ts->sb_count = 0;
+  memset(ts->sb_buf, 0, sizeof(ts->sb_buf));
 
   ts->state = STATE_NORMAL;
   ts->zoom_x = 1;
@@ -542,15 +561,19 @@ static inline void term_draw(TermState *ts, u8 *fb) {
     }
   }
 
+  // Clamp scroll_x to live grid bounds
   int max_scroll_x = TERM_COLS - vis_cols;
   if (max_scroll_x < 0) max_scroll_x = 0;
   if (ts->scroll_x > max_scroll_x) ts->scroll_x = max_scroll_x;
   if (ts->scroll_x < 0) ts->scroll_x = 0;
 
+  // scroll_y: negative means we are looking at scrollback history.
+  // The furthest back we can go is -(sb_count) rows (oldest saved line).
+  int min_scroll_y = -ts->sb_count;
   int max_scroll_y = TERM_ROWS - vis_rows;
   if (max_scroll_y < 0) max_scroll_y = 0;
   if (ts->scroll_y > max_scroll_y) ts->scroll_y = max_scroll_y;
-  if (ts->scroll_y < 0) ts->scroll_y = 0;
+  if (ts->scroll_y < min_scroll_y) ts->scroll_y = min_scroll_y;
 
   u8 bg_r = (ts->default_bg >> 16) & 0xff;
   u8 bg_g = (ts->default_bg >> 8) & 0xff;
@@ -571,7 +594,6 @@ static inline void term_draw(TermState *ts, u8 *fb) {
 
   for (int vy = 0; vy < vis_rows; vy++) {
     int gy = ts->scroll_y + vy;
-    if (gy >= TERM_ROWS) break;
     int py = vy * char_h;
 
     for (int vx = 0; vx < vis_cols; vx++) {
@@ -579,11 +601,31 @@ static inline void term_draw(TermState *ts, u8 *fb) {
       if (gx >= TERM_COLS) break;
       int px = vx * char_w;
 
-      int idx = gy * TERM_COLS + gx;
-      TermCell cell = ts->grid[idx];
+      TermCell cell;
+
+      if (gy < 0) {
+        // Row is in scrollback history.
+        // gy == -1 means the most-recently saved line (newest),
+        // gy == -sb_count means the oldest line.
+        // Mapping: slot index = (sb_head + sb_count + gy) % TERM_SCROLLBACK
+        int age = ts->sb_count + gy; // 0 = oldest, sb_count-1 = newest
+        if (age < 0 || age >= ts->sb_count) {
+          // Beyond stored history – show blank
+          cell.c = ' '; cell.fg = ts->default_fg; cell.bg = ts->default_bg; cell.flags = 0;
+        } else {
+          int slot = (ts->sb_head + age) % TERM_SCROLLBACK;
+          cell = ts->sb_buf[slot][gx];
+        }
+      } else if (gy < TERM_ROWS) {
+        int idx = gy * TERM_COLS + gx;
+        cell = ts->grid[idx];
+      } else {
+        break;
+      }
 
       u8 cell_flags = cell.flags;
-      if (gx == ts->cx && gy == ts->cy && ts->cursor_visible && blink_on) {
+      // Only draw cursor when viewing live grid
+      if (gy >= 0 && gx == ts->cx && gy == ts->cy && ts->cursor_visible && blink_on) {
         cell_flags ^= TERM_FLAG_REVERSE;
       }
 

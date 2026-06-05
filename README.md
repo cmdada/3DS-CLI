@@ -27,7 +27,7 @@ Install directly on your 3DS via [Universal Updater](https://db.universal-team.n
 2. Unzip the archive.
 3. Copy `3ds-cli.3dsx` and `Image` into the `3ds/` folder on your SD card.
 4. Launch 3DS-CLI from the Homebrew Launcher.
-5. Wait for Linux to boot. On my SDXC card it takes about 172 seconds to reach the
+5. Wait for Linux to boot. On my SDXC card it takes about 2.2 seconds to reach the
    login prompt.
 6. Log in as `root` with a blank password.
 

@@ -372,11 +372,18 @@ int main(int argc, char **argv) {
   uint64_t last_present_tick = 0;
   PresentTopScreen(&last_present_tick);
 
-  ram_image = malloc(ram_amt);
+  while (ram_amt >= 8 * 1024 * 1024) {
+    ram_image = malloc(ram_amt);
+    if (ram_image) break;
+    ram_amt -= 1024 * 1024;
+  }
+
   if (!ram_image) {
-    term_printf("Failed to allocate %lu bytes for RAM.\n", ram_amt);
+    term_printf("Failed to allocate at least 8MB for RAM.\n");
     goto wait_exit;
   }
+
+  term_printf("Allocated %lu bytes for RAM.\n", ram_amt);
 
   FILE *f = fopen("sdmc:/Image", "rb");
   if (!f) f = fopen("Image", "rb");

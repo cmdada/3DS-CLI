@@ -41,7 +41,7 @@ Install directly on your 3DS via [Universal Updater](https://db.universal-team.n
 | **ZR** | Toggle font (8x8 ↔ 5x7 compact) |
 | **Circle Pad** | Pan viewport (also disables auto-follow) |
 | **D-Pad** | Send arrow keys to Linux |
-| **START** | Quit and return to Homebrew Launcher |
+| **START** | Save Linux state, quit, and return to Homebrew Launcher |
 
 | Key | Action |
 |---|---|

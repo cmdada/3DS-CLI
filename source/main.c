@@ -284,6 +284,15 @@ struct MiniRV32IMAState *core;
 #define EMU_RUN_BUDGET_US 50000
 #define EMU_STEP_CHUNK 200000
 #define TOP_REFRESH_INTERVAL_US 33000
+#define STATE_MAGIC "3DSCLIST"
+#define STATE_VERSION 1
+
+typedef struct {
+  char magic[8];
+  uint32_t version;
+  uint32_t ram_amt;
+  uint32_t image_len;
+} PersistentStateHeader;
 
 char rx_buf[256];
 int rx_head = 0, rx_tail = 0;
@@ -318,6 +327,71 @@ static void PresentTopScreen(uint64_t *last_present_tick) {
   gspWaitForVBlank();
   *last_present_tick = svcGetSystemTick();
   term_state.dirty = false;
+}
+
+static FILE *OpenStateFile(const char *mode, const char **opened_path) {
+  static const char *paths[] = { "sdmc:/3ds-cli.state", "3ds-cli.state" };
+  for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    FILE *f = fopen(paths[i], mode);
+    if (f) {
+      if (opened_path) *opened_path = paths[i];
+      return f;
+    }
+  }
+  if (opened_path) *opened_path = paths[0];
+  return NULL;
+}
+
+static bool LoadPersistentState(uint32_t max_ram_amt, long *image_len) {
+  const char *path = NULL;
+  FILE *f = OpenStateFile("rb", &path);
+  if (!f) return false;
+
+  PersistentStateHeader hdr;
+  bool ok = false;
+  if (fread(&hdr, sizeof(hdr), 1, f) != 1) goto done;
+  if (memcmp(hdr.magic, STATE_MAGIC, sizeof(hdr.magic)) != 0) goto done;
+  if (hdr.version != STATE_VERSION) goto done;
+  if (hdr.ram_amt < 8 * 1024 * 1024 || hdr.ram_amt > max_ram_amt) goto done;
+
+  memset(ram_image, 0, max_ram_amt);
+  if (fread(ram_image, hdr.ram_amt, 1, f) != 1) goto done;
+
+  ram_amt = hdr.ram_amt;
+  if (image_len) *image_len = hdr.image_len;
+  term_printf("Restored persistent Linux state from %s.\n", path);
+  ok = true;
+
+done:
+  fclose(f);
+  if (!ok) term_printf("Ignoring invalid persistent state; booting Image.\n");
+  return ok;
+}
+
+static bool SavePersistentState(long image_len) {
+  const char *path = NULL;
+  FILE *f = OpenStateFile("wb", &path);
+  if (!f) {
+    term_printf("Warning: could not open persistent state for writing.\n");
+    return false;
+  }
+
+  PersistentStateHeader hdr;
+  memcpy(hdr.magic, STATE_MAGIC, sizeof(hdr.magic));
+  hdr.version = STATE_VERSION;
+  hdr.ram_amt = ram_amt;
+  hdr.image_len = image_len > 0 ? (uint32_t)image_len : 0;
+
+  bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
+            fwrite(ram_image, ram_amt, 1, f) == 1;
+  fclose(f);
+
+  if (ok) {
+    term_printf("Saved persistent Linux state to %s.\n", path);
+  } else {
+    term_printf("Warning: persistent state save failed.\n");
+  }
+  return ok;
 }
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
@@ -386,44 +460,55 @@ int main(int argc, char **argv) {
 
   term_printf("Allocated %lu bytes for RAM.\n", ram_amt);
 
-  FILE *f = fopen("sdmc:/Image", "rb");
-  if (!f) f = fopen("Image", "rb");
-  if (!f) {
-    term_printf("Error: Could not open 'sdmc:/Image'.\n");
-    term_printf("Please copy the Image file to your SD card.\n");
-    goto wait_exit;
+  long flen = 0;
+  bool restored_state = LoadPersistentState(ram_amt, &flen);
+
+  if (!restored_state) {
+    FILE *f = fopen("sdmc:/Image", "rb");
+    if (!f) f = fopen("Image", "rb");
+    if (!f) {
+      term_printf("Error: Could not open 'sdmc:/Image'.\n");
+      term_printf("Please copy the Image file to your SD card.\n");
+      goto wait_exit;
+    }
+
+    fseek(f, 0, SEEK_END);
+    flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen > ram_amt - 4*1024*1024) {
+      term_printf("Image too large for RAM.\n");
+      fclose(f); goto wait_exit;
+    }
+    memset(ram_image, 0, ram_amt);
+    if (fread(ram_image, flen, 1, f) != 1) {
+      term_printf("Error: Could not read Image.\n");
+      fclose(f); goto wait_exit;
+    }
+    fclose(f);
+
+    uint32_t dtb_ptr = ram_amt - sizeof(default64mbdtb) - sizeof(struct MiniRV32IMAState);
+    memcpy(ram_image + dtb_ptr, default64mbdtb, sizeof(default64mbdtb));
+    uint32_t *dtb = (uint32_t *)(ram_image + dtb_ptr);
+    if (dtb[0x13c/4] == 0x00c0ff03) {
+      uint32_t vr = dtb_ptr;
+      dtb[0x13c/4] = (vr>>24)|((vr>>16&0xff)<<8)|((vr>>8&0xff)<<16)|((vr&0xff)<<24);
+    }
+
+    core = (struct MiniRV32IMAState *)(ram_image + ram_amt - sizeof(struct MiniRV32IMAState));
+    core->pc = MINIRV32_RAM_IMAGE_OFFSET;
+    core->regs[10] = 0x00;
+    core->regs[11] = dtb_ptr ? (dtb_ptr + MINIRV32_RAM_IMAGE_OFFSET) : 0;
+    core->extraflags |= 3;
+  } else {
+    core = (struct MiniRV32IMAState *)(ram_image + ram_amt - sizeof(struct MiniRV32IMAState));
   }
 
-  fseek(f, 0, SEEK_END);
-  long flen = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (flen > ram_amt - 4*1024*1024) {
-    term_printf("Image too large for RAM.\n");
-    fclose(f); goto wait_exit;
-  }
-  memset(ram_image, 0, ram_amt);
-  fread(ram_image, flen, 1, f);
-  fclose(f);
-
-  uint32_t dtb_ptr = ram_amt - sizeof(default64mbdtb) - sizeof(struct MiniRV32IMAState);
-  memcpy(ram_image + dtb_ptr, default64mbdtb, sizeof(default64mbdtb));
-  uint32_t *dtb = (uint32_t *)(ram_image + dtb_ptr);
-  if (dtb[0x13c/4] == 0x00c0ff03) {
-    uint32_t vr = dtb_ptr;
-    dtb[0x13c/4] = (vr>>24)|((vr>>16&0xff)<<8)|((vr>>8&0xff)<<16)|((vr&0xff)<<24);
-  }
-
-  core = (struct MiniRV32IMAState *)(ram_image + ram_amt - sizeof(struct MiniRV32IMAState));
-  core->pc = MINIRV32_RAM_IMAGE_OFFSET;
-  core->regs[10] = 0x00;
-  core->regs[11] = dtb_ptr ? (dtb_ptr + MINIRV32_RAM_IMAGE_OFFSET) : 0;
-  core->extraflags |= 3;
-
-  term_printf("Booting Linux... This may take a while.\n");
+  term_printf(restored_state ? "Resuming Linux...\n" : "Booting Linux... This may take a while.\n");
   term_state.dirty = true;
   PresentTopScreen(&last_present_tick);
 
   bool touch_held = false;
+  bool emulator_fault = false;
   uint64_t last_tick = svcGetSystemTick();
 
   while (aptMainLoop()) {
@@ -576,7 +661,10 @@ int main(int argc, char **argv) {
              svcGetSystemTick() - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
 
     if (ret == 0x5555 || ret == 3) {
-      if (ret == 3) term_printf("Emulator fault!\n");
+      if (ret == 3) {
+        term_printf("Emulator fault!\n");
+        emulator_fault = true;
+      }
       term_state.dirty = true;
       PresentTopScreen(&last_present_tick);
       break;
@@ -591,6 +679,15 @@ int main(int argc, char **argv) {
     if (ret == 1) {
       svcSleepThread(1000000LL);
     }
+  }
+
+  if (!emulator_fault) {
+    term_printf("Saving Linux state...\n");
+    term_state.dirty = true;
+    PresentTopScreen(&last_present_tick);
+    SavePersistentState(flen);
+    term_state.dirty = true;
+    PresentTopScreen(&last_present_tick);
   }
 
   free(ram_image);

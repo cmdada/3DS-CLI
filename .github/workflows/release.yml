@@ -18,8 +18,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Build 3DSX
-        run: make
+      - name: Install CIA build tools
+        run: |
+          apt-get update && apt-get install -y wget build-essential zip unzip git cmake
+          git clone --recursive https://github.com/carstene1ns/3ds-bannertool.git /tmp/bannertool_src
+          cd /tmp/bannertool_src && cmake -B build && cmake --build build
+          cp /tmp/bannertool_src/build/bannertool /usr/local/bin/
+          chmod +x /usr/local/bin/bannertool
+          git clone https://github.com/3DSGuy/Project_CTR.git /tmp/Project_CTR
+          cd /tmp/Project_CTR/makerom && make deps && make
+          cp /tmp/Project_CTR/makerom/bin/makerom /usr/local/bin/
+          chmod +x /usr/local/bin/makerom
+
+      - name: Build 3DSX and CIA
+        run: make && make cia
 
       - name: Set release variables
         id: vars
@@ -27,12 +39,8 @@ jobs:
 
       - name: Package release asset
         run: |
-          if ! command -v zip >/dev/null 2>&1; then
-            apt-get update
-            apt-get install -y zip
-          fi
           rm -f 3ds_cli.zip
-          zip -j 3ds_cli.zip 3ds-cli.3dsx Image
+          zip -j 3ds_cli.zip 3ds-cli.3dsx 3ds-cli.cia Image
 
       - name: Create release
         uses: softprops/action-gh-release@v2

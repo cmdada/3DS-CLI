@@ -161,11 +161,22 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: all clean
+export BANNERTOOL  ?= bannertool
+export MAKEROM     ?= makerom
+
+export BANNER_IMAGE := $(TOPDIR)/banner.png
+export BANNER_AUDIO := $(TOPDIR)/silence.wav
+export BANNER       := $(TOPDIR)/banner.bnr
+export APP_RSF      := $(TOPDIR)/app.rsf
+
+.PHONY: all clean cia
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+cia: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile cia
 
 $(BUILD):
 	@mkdir -p $@
@@ -183,7 +194,7 @@ endif
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(GFXBUILD)
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(GFXBUILD) $(TARGET).cia $(BANNER)
 
 #---------------------------------------------------------------------------------
 $(GFXBUILD)/%.t3x	$(BUILD)/%.h	:	%.t3s
@@ -198,6 +209,16 @@ else
 # main targets
 #---------------------------------------------------------------------------------
 $(OUTPUT).3dsx	:	$(OUTPUT).elf $(_3DSXDEPS)
+
+$(BANNER): $(BANNER_IMAGE) $(BANNER_AUDIO)
+	@echo "building banner ..."
+	@$(BANNERTOOL) makebanner -i $(BANNER_IMAGE) -a $(BANNER_AUDIO) -o $@
+
+$(OUTPUT).cia: $(OUTPUT).elf $(_3DSXDEPS) $(BANNER)
+	@echo "building cia ..."
+	@$(MAKEROM) -f cia -o $@ -target t -elf $(OUTPUT).elf -rsf $(APP_RSF) -icon $(OUTPUT).smdh -banner $(BANNER) -exefslogo
+
+cia: $(OUTPUT).cia
 
 $(OFILES_SOURCES) : $(HFILES)
 

@@ -3,6 +3,8 @@ build/
 *.3dsx
 *.smdh
 *.elf
+*.cia
+*.bnr
 
 # Old branding
 3dssh.json

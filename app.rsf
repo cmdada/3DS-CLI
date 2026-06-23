@@ -1,0 +1,127 @@
+BasicInfo:
+  Title                   : "3DS-CLI"
+  CompanyCode             : "00"
+  ProductCode             : "CTR-P-CTAP"
+  ContentType             : Application
+  Logo                    : Nintendo
+
+TitleInfo:
+  UniqueId                : 0x01111
+  Category                : Application
+
+Option:
+  UseOnSD                 : true
+  FreeProductCode         : true
+  EnableCrypt             : false
+  EnableCompress          : true
+
+AccessControlInfo:
+  IdealProcessor                : 0
+  AffinityMask                  : 1
+  Priority                      : 16
+  MaxCpu                        : 0x9E
+  CoreVersion                   : 2
+  HandleTableSize               : 0x200
+  SystemMode                    : 64MB
+  SystemModeExt                 : Legacy
+  ResourceLimitCategory         : Application
+  MemoryType                    : Application
+  SystemCallAccess:
+    ControlMemory                 : 1
+    QueryMemory                   : 2
+    ExitProcess                   : 3
+    SetProcessAffinityMask        : 4
+    SetProcessIdealProcessor      : 5
+    CreateThread                  : 8
+    ExitThread                    : 9
+    SleepThread                   : 10
+    GetThreadPriority             : 11
+    SetThreadPriority             : 12
+    GetThreadAffinityMask         : 13
+    SetThreadAffinityMask         : 14
+    GetThreadIdealProcessor       : 15
+    SetThreadIdealProcessor       : 16
+    CreateMutex                   : 19
+    ReleaseMutex                  : 20
+    CreateSemaphore               : 21
+    ReleaseSemaphore              : 22
+    CreateEvent                   : 23
+    SignalEvent                   : 24
+    ClearEvent                    : 25
+    CreateTimer                   : 26
+    SetTimer                      : 27
+    CancelTimer                   : 28
+    ClearTimer                    : 29
+    CreateMemoryBlock             : 30
+    MapMemoryBlock                : 31
+    UnmapMemoryBlock              : 32
+    CreateAddressArbiter          : 33
+    ArbitrateAddress              : 34
+    CloseHandle                   : 35
+    WaitSynchronization1          : 36
+    WaitSynchronizationN          : 37
+    DuplicateHandle               : 39
+    GetSystemTick                 : 40
+    GetHandleInfo                 : 41
+    GetSystemInfo                 : 42
+    GetProcessInfo                : 43
+    ConnectToPort                 : 45
+    SendSyncRequest1              : 46
+    SendSyncRequest2              : 47
+    SendSyncRequest3              : 48
+    SendSyncRequest4              : 49
+    SendSyncRequest               : 50
+    GetProcessId                  : 53
+    GetProcessIdOfThread          : 54
+    GetThreadId                   : 55
+    GetResourceLimit              : 56
+    GetResourceLimitLimitValues   : 57
+    GetResourceLimitCurrentValues : 58
+    GetThreadContext              : 59
+    Break                         : 60
+    OutputDebugString             : 61
+  InterruptNumbers:
+  ServiceAccessControl:
+    - "APT:U"
+    - "ac:u"
+    - "am:net"
+    - "boss:U"
+    - "cam:u"
+    - "cecd:u"
+    - "cfg:u"
+    - "csnd:SND"
+    - "dsp::DSP"
+    - "frd:u"
+    - "fs:USER"
+    - "gsp::Gpu"
+    - "gsp::Lcd"
+    - "hid:USER"
+    - "http:C"
+    - "ir:rst"
+    - "ir:u"
+    - "ir:USER"
+    - "mic:u"
+    - "ndm:u"
+    - "news:s"
+    - "nwm::UDS"
+    - "ptm:u"
+    - "ptm:sysm"
+    - "pxi:dev"
+    - "soc:U"
+    - "ssl:C"
+    - "y2r:u"
+    - "ldr:ro"
+  FileSystemAccess:
+    - DirectSdmc
+    - DirectSdmcWrite
+    - CtrNandRo
+    - CtrNandRw
+    - CtrNandRoWrite
+    - CategorySystemApplication
+    - CategoryHardwareCheck
+    - CategoryFileSystemTool
+
+SystemControlInfo:
+  SaveDataSize: 0KB
+  RemasterVersion: 0
+  StackSize: 0x10000

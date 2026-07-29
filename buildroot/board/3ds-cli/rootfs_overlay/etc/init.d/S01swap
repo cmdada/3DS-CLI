@@ -1,0 +1,50 @@
+#!/bin/sh
+# Turn on swap. Preferred backing is /dev/vdb, the emulator's second
+# virtio-blk device (backed by sdmc:/swap.img) — the 3DS does that I/O
+# natively, so it beats compressing pages on the emulated CPU, and it adds
+# memory rather than borrowing it. zram is the fallback for when the app
+# couldn't create swap.img and the device simply isn't there.
+
+DEV=
+
+# The swap device is exactly 64MB = 131072 512-byte sectors, and the rootfs
+# is 128MB. mkswap on the wrong device would eat the rootfs, so confirm the
+# size before touching it rather than trusting vda/vdb probe ordering.
+SWAP_SECTORS=131072
+
+start() {
+	if [ -b /dev/vdb ] && [ "$(cat /sys/class/block/vdb/size 2>/dev/null)" = "$SWAP_SECTORS" ]; then
+		# swap.img is recreated fresh on every launch, so it never
+		# carries a signature over — always mkswap before swapon.
+		if mkswap /dev/vdb >/dev/null 2>&1 && swapon /dev/vdb 2>/dev/null; then
+			DEV=/dev/vdb
+		fi
+	fi
+
+	if [ -z "$DEV" ] && [ -e /sys/block/zram0/disksize ]; then
+		echo $((32 * 1024 * 1024)) > /sys/block/zram0/disksize
+		if mkswap /dev/zram0 >/dev/null 2>&1 && swapon /dev/zram0 2>/dev/null; then
+			DEV=/dev/zram0
+		fi
+	fi
+
+	[ -z "$DEV" ] && { echo "No swap device available"; return 0; }
+
+	# Fault in one 4K page at a time. The default page-cluster reads 8
+	# pages per fault, which on this device is a large synchronous SD
+	# read that's mostly thrown away.
+	echo 0 > /proc/sys/vm/page-cluster
+
+	echo "Swap enabled on $DEV"
+}
+
+stop() {
+	swapoff -a 2>/dev/null
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

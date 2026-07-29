@@ -54,28 +54,85 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_3DS_CLI_PATH)/board/3ds-cli/post_im
 BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 
-# Better shell
+# Better shells
 BR2_PACKAGE_BASH=y
 BR2_PACKAGE_BASH_COMPLETION=y
+BR2_PACKAGE_ZSH=y
 
 # System monitoring
 BR2_PACKAGE_HTOP=y
 BR2_PACKAGE_PROCPS_NG=y
+BR2_PACKAGE_LSHW=y
+BR2_PACKAGE_TIME=y
 
 # Terminal / ncurses (needed by htop, nano)
 BR2_PACKAGE_NCURSES=y
 BR2_PACKAGE_NCURSES_TARGET_HEADERS=y
+BR2_PACKAGE_NCURSES_TARGET_PROGS=y
+BR2_PACKAGE_SLANG=y
 
 # Text editors
 BR2_PACKAGE_NANO=y
 BR2_PACKAGE_VIM=y
+BR2_PACKAGE_ED=y
+
+# Core shell utilities not covered by busybox
+BR2_PACKAGE_SED=y
+BR2_PACKAGE_TAR=y
+BR2_PACKAGE_GZIP=y
+BR2_PACKAGE_ZIP=y
+BR2_PACKAGE_CPIO=y
+BR2_PACKAGE_LESS=y
+BR2_PACKAGE_WHICH=y
+
+# Development / scripting
+BR2_PACKAGE_GIT=y
+BR2_PACKAGE_MAKE=y
+BR2_PACKAGE_PYTHON_PIP=y
+BR2_PACKAGE_PYTHON3_CURSES=y
+BR2_PACKAGE_PYTHON3_XZ=y
+BR2_PACKAGE_HOST_PYTHON3=y
+BR2_PACKAGE_LUA=y
+BR2_PACKAGE_QUICKJS=y
+
+# Package management
+BR2_PACKAGE_OPKG=y
+BR2_PACKAGE_OPKG_UTILS=y
+BR2_PACKAGE_OPKG_GPG_SIGN=y
+
+# Filesystem tools — for poking at the SD card and the rootfs image itself
+BR2_PACKAGE_DOSFSTOOLS=y
+BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y
+BR2_PACKAGE_EXFAT=y
+BR2_PACKAGE_EXFAT_UTILS=y
+BR2_PACKAGE_EXFATPROGS=y
+BR2_PACKAGE_F2FS_TOOLS=y
+BR2_PACKAGE_XFSPROGS=y
+BR2_PACKAGE_SQUASHFS=y
+
+# Hardware / kernel module tools
+BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_KMOD_TOOLS=y
+BR2_PACKAGE_I2C_TOOLS=y
+BR2_PACKAGE_SPI_TOOLS=y
+BR2_PACKAGE_MMC_UTILS=y
+BR2_PACKAGE_LIBCAP_NG=y
+BR2_PACKAGE_POPT=y
+
+# Benchmarks — useful for gauging the emulator's speed on real hardware
+BR2_PACKAGE_COREMARK=y
+BR2_PACKAGE_STRESS_NG=y
 
 # Fun / system info
 BR2_PACKAGE_NEOFETCH=y
+BR2_PACKAGE_SCREENFETCH=y
 BR2_PACKAGE_TREE=y
 BR2_PACKAGE_FILE=y
+BR2_PACKAGE_SL=y
+BR2_PACKAGE_ASCII_INVADERS=y
 BR2_PACKAGE_UTIL_LINUX=y
 BR2_PACKAGE_UTIL_LINUX_BINARIES=y
+BR2_PACKAGE_UTIL_LINUX_SCHEDUTILS=y
 
 # Networking — talks out through the emulator's virtio-net/slirp NAT
 # device (see source/virtio_net.h), which bridges to the 3DS's real WiFi.
@@ -86,4 +143,11 @@ BR2_PACKAGE_WGET=y
 # Filesystem support in host tools
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-BR2_TARGET_ROOTFS_EXT2_SIZE="128M"
+BR2_TARGET_ROOTFS_EXT2_SIZE="192M"
+
+# Deliberately left out — both fail to build against this toolchain:
+#   BR2_PACKAGE_FIRMWARE_UTILS   CMakeLists.txt requires CMake < 3.5, which
+#                                CMake 4.x refuses to configure.
+#   BR2_PACKAGE_LINUX_TOOLS_*    perf fails to compile bench/futex-requeue.o
+#                                against 6.6.63; selftests installs BPF-arch
+#                                objects into the RISC-V rootfs.

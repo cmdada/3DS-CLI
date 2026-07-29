@@ -7,8 +7,11 @@
  * Virtio-mmio block device emulation.
  *
  * Implements the virtio-mmio 2.0 transport + virtio-blk device.
- * The device lives at VIRTIO_BLK_BASE (0x10001000) within the existing
- * mini-rv32ima MMIO window, so MINIRV32_MMIO_RANGE needs no changes.
+ * Two instances exist, both within the existing mini-rv32ima MMIO window
+ * (so MINIRV32_MMIO_RANGE needs no changes): the rootfs at
+ * VIRTIO_BLK_BASE (0x10001000, /dev/vda) and the swap device at
+ * VIRTIO_BLK2_BASE (0x10005000, /dev/vdb). They share all of the code
+ * below; everything device-specific lives in vblk_dev_t.
  *
  * Interrupts: completion sets MEIP (mip bit 11) directly on the emulated
  * CPU.  The DTB wires the virtio-mmio interrupt-parent to riscv,cpu-intc
@@ -20,6 +23,8 @@
 
 #define VIRTIO_BLK_BASE   0x10001000u
 #define VIRTIO_BLK_SIZE   0x1000u
+#define VIRTIO_BLK2_BASE  0x10005000u   /* swap device (see main.c) */
+#define VBLK_COUNT        2u
 #define RISCV_RAM_BASE    0x80000000u
 #define SECTOR_SZ         512u
 /* Must be a power of 2. Must also be >= 2+MAX_SKB_FRAGS+... (~19) for
@@ -76,7 +81,7 @@
 /* ------------------------------------------------------------------
  * Device state
  * ------------------------------------------------------------------ */
-static struct {
+typedef struct {
     uint32_t dev_feat_sel;
     uint32_t drv_feat_sel;
     uint32_t drv_features_lo;
@@ -91,7 +96,11 @@ static struct {
     uint16_t last_avail_idx;
     FILE    *disk;
     uint64_t capacity_sectors;
-} vblk;
+    uint32_t base;               /* MMIO window this instance answers on */
+    uint32_t plic_src;           /* PLIC source it raises completions on */
+} vblk_dev_t;
+
+static vblk_dev_t vblk_devs[VBLK_COUNT];
 
 /* MiniRV32IMAState *core must be visible where virtio_blk.h is included */
 extern struct MiniRV32IMAState *core;
@@ -123,24 +132,24 @@ static void vblk_read_desc(uint8_t *desc_table, uint16_t idx,
 }
 
 /* Process all pending virtq entries when the guest rings the doorbell */
-static void vblk_process_queue(uint8_t *ram) {
-    if (!vblk.queue_ready || !vblk.disk || !vblk.queue_desc_lo) return;
+static void vblk_process_queue(vblk_dev_t *d, uint8_t *ram) {
+    if (!d->queue_ready || !d->disk || !d->queue_desc_lo) return;
 
-    uint8_t *desc_table = guest_ptr(ram, vblk.queue_desc_lo,
+    uint8_t *desc_table = guest_ptr(ram, d->queue_desc_lo,
                                     VQUEUE_SIZE * 16u);
-    uint8_t *avail_ring = guest_ptr(ram, vblk.queue_driver_lo, 6u);
-    uint8_t *used_ring  = guest_ptr(ram, vblk.queue_device_lo, 6u);
+    uint8_t *avail_ring = guest_ptr(ram, d->queue_driver_lo, 6u);
+    uint8_t *used_ring  = guest_ptr(ram, d->queue_device_lo, 6u);
     if (!desc_table || !avail_ring || !used_ring) return;
 
     /* avail ring layout: flags(2) idx(2) ring[N](2 each) */
     uint16_t avail_idx;
     memcpy(&avail_idx, avail_ring + 2, 2);
 
-    while (vblk.last_avail_idx != avail_idx) {
-        uint16_t ring_pos = vblk.last_avail_idx % VQUEUE_SIZE;
+    while (d->last_avail_idx != avail_idx) {
+        uint16_t ring_pos = d->last_avail_idx % VQUEUE_SIZE;
         uint16_t head;
         memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
-        vblk.last_avail_idx++;
+        d->last_avail_idx++;
 
         /* Collect descriptor chain (max 64 entries) */
         uint16_t chain[64];
@@ -184,17 +193,17 @@ static void vblk_process_queue(uint8_t *ram) {
                     /* Data transfer */
                     long disk_off = (long)(sector * SECTOR_SZ);
                     if (req_type == VBLK_T_IN) {
-                        fseek(vblk.disk, disk_off, SEEK_SET);
-                        size_t n = fread(buf, 1, dl, vblk.disk);
+                        fseek(d->disk, disk_off, SEEK_SET);
+                        size_t n = fread(buf, 1, dl, d->disk);
                         bytes_xfer += (uint32_t)n;
                         sector     += dl / SECTOR_SZ;
                     } else if (req_type == VBLK_T_OUT) {
-                        fseek(vblk.disk, disk_off, SEEK_SET);
-                        fwrite(buf, 1, dl, vblk.disk);
+                        fseek(d->disk, disk_off, SEEK_SET);
+                        fwrite(buf, 1, dl, d->disk);
                         bytes_xfer += dl;
                         sector     += dl / SECTOR_SZ;
                     } else if (req_type == VBLK_T_FLUSH) {
-                        fflush(vblk.disk);
+                        fflush(d->disk);
                     }
                 }
             }
@@ -212,74 +221,89 @@ static void vblk_process_queue(uint8_t *ram) {
             memcpy(used_ring + 2, &used_idx_val, 2);
         }
 
-        vblk.int_status |= 1u; /* VIRTIO_INT_VRING */
+        d->int_status |= 1u; /* VIRTIO_INT_VRING */
     }
 
     /* Notify the PLIC if any completions produced */
-    if (vblk.int_status) plic_set_pending(PLIC_SRC_BLK, true);
+    if (d->int_status) plic_set_pending(d->plic_src, true);
 }
 
 /* ------------------------------------------------------------------
  * MMIO interface (called from HandleControlLoad / HandleControlStore)
  * ------------------------------------------------------------------ */
-static void vblk_init(FILE *disk, uint64_t size_bytes) {
-    memset(&vblk, 0, sizeof(vblk));
-    vblk.disk              = disk;
-    vblk.capacity_sectors  = size_bytes / SECTOR_SZ;
-    vblk.queue_num         = VQUEUE_SIZE;
+static void vblk_init(unsigned idx, FILE *disk, uint64_t size_bytes,
+                      uint32_t base, uint32_t plic_src) {
+    vblk_dev_t *d = &vblk_devs[idx];
+    memset(d, 0, sizeof(*d));
+    d->disk              = disk;
+    d->capacity_sectors  = size_bytes / SECTOR_SZ;
+    d->queue_num         = VQUEUE_SIZE;
+    d->base              = base;
+    d->plic_src          = plic_src;
 }
 
-static uint32_t vblk_load(uint32_t addy) {
-    uint32_t r = addy - VIRTIO_BLK_BASE;
+/* Which instance (if any) owns this MMIO address. An instance whose backing
+   file was never opened (base == 0, e.g. swap when the file couldn't be
+   created) matches nothing, so the guest simply sees no device there. */
+static vblk_dev_t *vblk_for_addr(uint32_t addy) {
+    for (unsigned i = 0; i < VBLK_COUNT; i++) {
+        vblk_dev_t *d = &vblk_devs[i];
+        if (d->base && addy >= d->base && addy < d->base + VIRTIO_BLK_SIZE) return d;
+    }
+    return NULL;
+}
+
+static uint32_t vblk_load(vblk_dev_t *d, uint32_t addy) {
+    uint32_t r = addy - d->base;
     switch (r) {
     case VREG_MAGIC:           return 0x74726976u; /* "virt" */
     case VREG_VERSION:         return 2u;
     case VREG_DEVICE_ID:       return 2u;          /* block device */
     case VREG_VENDOR_ID:       return 0x554d4551u; /* "QEMU" */
-    case VREG_DEVICE_FEATURES: return (vblk.dev_feat_sel == 1) ? VIRTIO_F_VERSION_1_HI : 0u;
+    case VREG_DEVICE_FEATURES: return (d->dev_feat_sel == 1) ? VIRTIO_F_VERSION_1_HI : 0u;
     case VREG_QUEUE_NUM_MAX:   return VQUEUE_SIZE;
-    case VREG_QUEUE_READY:     return vblk.queue_ready;
-    case VREG_INT_STATUS:      return vblk.int_status;
-    case VREG_STATUS:          return vblk.status;
+    case VREG_QUEUE_READY:     return d->queue_ready;
+    case VREG_INT_STATUS:      return d->int_status;
+    case VREG_STATUS:          return d->status;
     case VREG_CONFIG_GEN:      return 0u;
-    case VREG_BLK_CAP_LO:     return (uint32_t)(vblk.capacity_sectors & 0xffffffffu);
-    case VREG_BLK_CAP_HI:     return (uint32_t)(vblk.capacity_sectors >> 32);
+    case VREG_BLK_CAP_LO:     return (uint32_t)(d->capacity_sectors & 0xffffffffu);
+    case VREG_BLK_CAP_HI:     return (uint32_t)(d->capacity_sectors >> 32);
     default:                   return 0u;
     }
 }
 
-static void vblk_store(uint32_t addy, uint32_t val, uint8_t *ram) {
-    uint32_t r = addy - VIRTIO_BLK_BASE;
+static void vblk_store(vblk_dev_t *d, uint32_t addy, uint32_t val, uint8_t *ram) {
+    uint32_t r = addy - d->base;
     switch (r) {
-    case VREG_DEV_FEAT_SEL:   vblk.dev_feat_sel    = val; break;
-    case VREG_DRV_FEAT_SEL:   vblk.drv_feat_sel    = val; break;
+    case VREG_DEV_FEAT_SEL:   d->dev_feat_sel    = val; break;
+    case VREG_DRV_FEAT_SEL:   d->drv_feat_sel    = val; break;
     case VREG_DRIVER_FEATURES:
-        if (vblk.drv_feat_sel == 0) vblk.drv_features_lo = val;
-        else                        vblk.drv_features_hi = val;
+        if (d->drv_feat_sel == 0) d->drv_features_lo = val;
+        else                      d->drv_features_hi = val;
         break;
     case VREG_QUEUE_SEL:       /* only queue 0 */ break;
-    case VREG_QUEUE_NUM:       vblk.queue_num       = val < VQUEUE_SIZE ? val : VQUEUE_SIZE; break;
-    case VREG_QUEUE_READY:     vblk.queue_ready     = val; break;
-    case VREG_QUEUE_NOTIFY:    vblk_process_queue(ram); break;
+    case VREG_QUEUE_NUM:       d->queue_num       = val < VQUEUE_SIZE ? val : VQUEUE_SIZE; break;
+    case VREG_QUEUE_READY:     d->queue_ready     = val; break;
+    case VREG_QUEUE_NOTIFY:    vblk_process_queue(d, ram); break;
     case VREG_INT_ACK:
-        vblk.int_status &= ~val;
-        plic_set_pending(PLIC_SRC_BLK, vblk.int_status != 0);
+        d->int_status &= ~val;
+        plic_set_pending(d->plic_src, d->int_status != 0);
         break;
     case VREG_STATUS:
-        vblk.status = val;
+        d->status = val;
         if (val == 0) {
             /* driver-triggered reset */
-            vblk.queue_ready = 0;
-            vblk.int_status  = 0;
-            vblk.last_avail_idx = 0;
-            plic_set_pending(PLIC_SRC_BLK, false);
+            d->queue_ready = 0;
+            d->int_status  = 0;
+            d->last_avail_idx = 0;
+            plic_set_pending(d->plic_src, false);
         }
         break;
-    case VREG_QUEUE_DESC_LO:   vblk.queue_desc_lo   = val; break;
+    case VREG_QUEUE_DESC_LO:   d->queue_desc_lo   = val; break;
     case VREG_QUEUE_DESC_HI:   break; /* 32-bit only */
-    case VREG_QUEUE_DRIVER_LO: vblk.queue_driver_lo = val; break;
+    case VREG_QUEUE_DRIVER_LO: d->queue_driver_lo = val; break;
     case VREG_QUEUE_DRIVER_HI: break;
-    case VREG_QUEUE_DEVICE_LO: vblk.queue_device_lo = val; break;
+    case VREG_QUEUE_DEVICE_LO: d->queue_device_lo = val; break;
     case VREG_QUEUE_DEVICE_HI: break;
     default: break;
     }

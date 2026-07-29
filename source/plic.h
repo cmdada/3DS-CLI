@@ -28,6 +28,9 @@
 #define PLIC_SRC_BLK   1u
 #define PLIC_SRC_NET   2u
 #define PLIC_SRC_RNG   3u
+#define PLIC_SRC_SWAP  4u   /* second virtio-blk instance (swap, /dev/vdb) */
+#define PLIC_SRC_9P    5u   /* virtio-9p: SD/NAND/hw passthrough */
+#define PLIC_SRC_INPUT 6u   /* virtio-input: motion sensors + sliders */
 
 #define PLIC_PRIORITY_BASE   0x000000u
 #define PLIC_PENDING_BASE    0x001000u

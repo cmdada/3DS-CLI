@@ -169,11 +169,25 @@ export BANNER_AUDIO := $(TOPDIR)/silence.wav
 export BANNER       := $(TOPDIR)/banner.bnr
 export APP_RSF      := $(TOPDIR)/app.rsf
 
-.PHONY: all clean cia dtb
+.PHONY: all clean cia dtb check
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@$(MAKE) --no-print-directory check
+
+#---------------------------------------------------------------------------------
+# A .3dsx can link cleanly, pass 3dsxtool, and still be rejected outright by
+# every loader over one unencodable relocation — with no build-time warning.
+# That cost a long bisect once; this makes it a build failure instead.
+# Skipped rather than failed when python3 isn't around, so the toolchain
+# requirement stays exactly what it was.
+check: $(OUTPUT).3dsx
+	@if command -v python3 >/dev/null 2>&1; then \
+		python3 $(CURDIR)/tools/check3dsx.py $(OUTPUT).3dsx; \
+	else \
+		echo "check: python3 not found, skipping 3dsx validation"; \
+	fi
 
 #---------------------------------------------------------------------------------
 # Regenerate source/default64mbdtc.h from source/3ds-cli.dts (requires dtc + python3)

@@ -1,0 +1,2 @@
+# -B: allow logins with a blank password (root has none by default)
+DROPBEAR_ARGS="$DROPBEAR_ARGS -B"

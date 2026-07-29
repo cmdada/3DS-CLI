@@ -83,6 +83,44 @@
 			interrupts = <0x03>;
 		};
 
+		/* virtio-blk #2: swap device (/dev/vdb), backed by a
+		   sdmc:/swap.img the app creates at launch and removes on exit.
+		   Guest RAM here is whatever the 3DS heap can spare (8-64MB),
+		   so without swap anything substantial gets OOM-killed. Absent
+		   at runtime if the file couldn't be created — the MMIO window
+		   then reads back as zeroes, which fails the driver's magic-value
+		   probe, so the guest just sees no device. */
+		virtio_mmio@10005000 {
+			compatible = "virtio,mmio";
+			reg = <0x00 0x10005000 0x00 0x1000>;
+			interrupt-parent = <0x05>;
+			interrupts = <0x04>;
+		};
+
+		/* virtio-9p: 3DS filesystem passthrough (see virtio_9p.h). One
+		   device exporting several trees, chosen per-mount with
+		   `-o aname=`: sd (the real SD card), nand/twl (the NAND
+		   filesystems, read-only, and only present with extended
+		   homebrew permissions), and hw (synthetic sensor, camera,
+		   mic and audio files). Mount tag is "3ds". */
+		virtio_mmio@10006000 {
+			compatible = "virtio,mmio";
+			reg = <0x00 0x10006000 0x00 0x1000>;
+			interrupt-parent = <0x05>;
+			interrupts = <0x05>;
+		};
+
+		/* virtio-input: the accelerometer, gyroscope and the 3D/volume
+		   sliders as a normal evdev node (see virtio_input.h). The same
+		   readings are also in the hw 9P tree as text; this node is for
+		   guest software that speaks evdev. */
+		virtio_mmio@10007000 {
+			compatible = "virtio,mmio";
+			reg = <0x00 0x10007000 0x00 0x1000>;
+			interrupt-parent = <0x05>;
+			interrupts = <0x06>;
+		};
+
 		/* goldfish-rtc: real wall-clock time from the 3DS's hardware RTC.
 		   Polled only (main.c latches the time on each register read),
 		   no interrupt line needed. */

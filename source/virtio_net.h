@@ -325,7 +325,10 @@ static void udp_poll(void) {
 /* TCP NAT — minimal proxy state machine                               */
 /* ------------------------------------------------------------------ */
 #define TCP_MAX_CONNS 6
-typedef enum { TCP_FREE, TCP_CONNECTING, TCP_ESTABLISHED, TCP_CLOSING, TCP_CLOSED } tcp_st_t;
+/* TCP_SYN_GUEST: an inbound (host->guest) connection we've accepted on the
+   ssh forward port and are now handshaking into the guest - we sent the SYN
+   and are waiting for the guest's SYN-ACK. */
+typedef enum { TCP_FREE, TCP_CONNECTING, TCP_SYN_GUEST, TCP_ESTABLISHED, TCP_CLOSING, TCP_CLOSED } tcp_st_t;
 typedef struct {
     tcp_st_t state;
     int fd;
@@ -337,8 +340,15 @@ typedef struct {
     uint64_t last_tick;
     bool guest_fin_seen;
     bool local_fin_sent;
+    uint32_t syn_retries;
 } tcp_conn_t;
 static tcp_conn_t tcp_conns[TCP_MAX_CONNS];
+
+/* Inbound ssh port forward (QEMU hostfwd-style): listen on the 3DS side and
+   proxy accepted connections to the guest's dropbear. */
+#define VNET_SSH_FWD_PORT   2222
+#define VNET_SSH_GUEST_PORT 22
+static int ssh_listen_fd = -1;
 
 static void tcp_send_seg(tcp_conn_t *c, uint8_t flags, const uint8_t *payload, int paylen) {
     uint8_t seg[20 + 1460];
@@ -430,6 +440,16 @@ static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t
     }
     if (!c) return;
 
+    if (c->state == TCP_SYN_GUEST) {
+        /* Waiting for the guest's SYN-ACK to our forwarded-connection SYN. */
+        if ((flags & 0x12) == 0x12) {
+            c->ack_them = seq + 1;
+            c->state = TCP_ESTABLISHED;
+            tcp_send_seg(c, 0x10 /* ACK */, NULL, 0);
+        }
+        return;
+    }
+
     c->last_tick = svcGetSystemTick();
     if (paylen > 0) {
         if (c->fd >= 0) send(c->fd, payload, paylen, 0);
@@ -446,10 +466,50 @@ static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t
 }
 
 static void tcp_poll(void) {
+    /* Accept inbound ssh-forward connections and start handshaking them
+       into the guest. The synthetic remote is the gateway IP (so the
+       guest's ARP already resolves it) with a rotating ephemeral port. */
+    if (ssh_listen_fd >= 0) {
+        for (;;) {
+            int afd = accept(ssh_listen_fd, NULL, NULL);
+            if (afd < 0) break;
+            int slot = -1;
+            for (int i = 0; i < TCP_MAX_CONNS; i++)
+                if (tcp_conns[i].state == TCP_FREE) { slot = i; break; }
+            if (slot < 0) { close(afd); break; }
+            fcntl(afd, F_SETFL, O_NONBLOCK);
+            static uint16_t fwd_port_seq = 0;
+            tcp_conn_t *c = &tcp_conns[slot];
+            c->state = TCP_SYN_GUEST;
+            c->fd = afd;
+            c->guest_port = VNET_SSH_GUEST_PORT;
+            c->dst_ip = vnet_ip_gw;
+            c->dst_port = (uint16_t)(40000u + (fwd_port_seq++ & 0x1fff));
+            memcpy(c->guest_mac, vnet_guest_mac, 6);
+            c->seq_us = (uint32_t)svcGetSystemTick();
+            c->ack_them = 0;
+            c->guest_fin_seen = c->local_fin_sent = false;
+            c->syn_retries = 0;
+            tcp_send_seg(c, 0x02 /* SYN */, NULL, 0);
+        }
+    }
+
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         tcp_conn_t *c = &tcp_conns[i];
         if (c->state == TCP_FREE) continue;
         if (svcGetSystemTick() - c->last_tick > 300ull * 1000000ull * 268ull) { tcp_close_slot(c); continue; }
+
+        if (c->state == TCP_SYN_GUEST) {
+            /* Retransmit our SYN until the guest answers (it may still be
+               booting); give up after ~30 tries. tcp_send_seg advanced
+               seq_us for the SYN, so rewind before resending the same one. */
+            if (svcGetSystemTick() - c->last_tick > 1000ull * 1000ull * 268ull) {
+                if (++c->syn_retries > 30) { tcp_close_slot(c); continue; }
+                c->seq_us -= 1;
+                tcp_send_seg(c, 0x02, NULL, 0);
+            }
+            continue;
+        }
 
         if (c->state == TCP_CONNECTING) {
             int err = 0; socklen_t el = sizeof(err);
@@ -625,11 +685,47 @@ static void vnet_init(void) {
     static u32 *soc_buf = NULL;
     if (!soc_buf) soc_buf = (u32 *)memalign(0x1000, 0x100000);
     vnet.soc_ready = soc_buf && R_SUCCEEDED(socInit(soc_buf, 0x100000));
+
+    /* ssh port forward: connections to <3DS ip>:2222 land on the guest's
+       dropbear. Failure is non-fatal - outbound NAT still works. */
+    if (vnet.soc_ready && ssh_listen_fd < 0) {
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (lfd >= 0) {
+            int one = 1;
+            setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+            struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(VNET_SSH_FWD_PORT);
+            sa.sin_addr.s_addr = htonl(INADDR_ANY);
+            if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(lfd, 2) == 0) {
+                fcntl(lfd, F_SETFL, O_NONBLOCK);
+                ssh_listen_fd = lfd;
+            } else {
+                close(lfd);
+            }
+        }
+    }
+}
+
+/* Config space: the 6-byte MAC, read a byte at a time by the driver.
+   noinline for the same reason as v9p_config_read in virtio_9p.h: inlined,
+   the index here is `addy - 0x10002100`, and GCC is free to strength-reduce
+   the lookup into `*((&vnet_guest_mac - 0x10002100) + addy)` and store that
+   folded base in a literal pool. It wraps to 0xF0xxxxxx, which a 3DSX
+   absolute relocation cannot encode — the top nibble is a reserved sub-type
+   field — and every loader then rejects the entire app with a relocation
+   error and no useful diagnostic. That exact fold in the 9P device cost a
+   long bisect to track down. GCC happens not to make that choice here today;
+   this makes sure it stays that way. `make` runs tools/check3dsx.py to catch
+   it if some future change reintroduces the pattern elsewhere. */
+static __attribute__((noinline)) uint32_t vnet_config_read(uint32_t o) {
+    if (o < sizeof(vnet_guest_mac)) return vnet_guest_mac[o];
+    return 0;
 }
 
 static uint32_t vnet_load(uint32_t addy) {
     uint32_t r = addy - VIRTIO_NET_BASE;
-    if (r >= 0x100 && r <= 0x105) return vnet_guest_mac[r - 0x100];
+    if (r >= 0x100) return vnet_config_read(r - 0x100);
     switch (r) {
     case VREG_MAGIC:           return 0x74726976u;
     case VREG_VERSION:         return 2u;

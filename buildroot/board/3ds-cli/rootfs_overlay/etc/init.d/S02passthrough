@@ -1,0 +1,54 @@
+#!/bin/sh
+# Mount the 3DS passthrough tree exported by the emulator's virtio-9p device
+# (see source/virtio_9p.h). One mount brings up everything:
+#
+#   /mnt/3ds/sd    the console's real SD card, read-write
+#   /mnt/3ds/nand  CTR NAND, read-only, only with extended homebrew perms
+#   /mnt/3ds/twl   TWL NAND, same
+#   /mnt/3ds/hw    sensors, battery, camera, mic, speakers
+#
+# One mount rather than four because Linux's virtio-9p transport binds a
+# channel to a single mount: a second mount of the same device fails with
+# "no channels available" regardless of aname=. The server exports the trees
+# as subdirectories of one root instead, so they all arrive together.
+#
+# Deliberately no cache= option: Horizon has the same SD card mounted while
+# we run, so caching guest-side would hand out pages the 3DS may have already
+# changed underneath us. Every read costs a round trip to the host, which is
+# a native fread there — far cheaper than the emulated CPU cycles a cache
+# lookup would save.
+#
+# msize matches V9P_MSIZE in virtio_9p.h. Asking for more just gets clamped
+# at Tversion, but keeping them equal avoids a pointless renegotiation.
+
+TAG=3ds
+DIR=/mnt/3ds
+OPTS="trans=virtio,version=9p2000.L,msize=16384"
+
+start() {
+	# No virtio-9p device at all (older build of the app): nothing to do.
+	grep -q 9p /proc/filesystems 2>/dev/null || return 0
+
+	mkdir -p "$DIR" 2>/dev/null
+	# Keep mount's own diagnostic: when this fails it is the only clue as to
+	# why, and a bare "unavailable" sent us chasing the wrong thing once.
+	err=$(mount -t 9p -o "$OPTS" "$TAG" "$DIR" 2>&1)
+	if [ $? -eq 0 ]; then
+		# Report what actually came up — nand/twl are absent unless the
+		# app had permission to mount them host-side.
+		echo "3DS passthrough on $DIR: $(ls "$DIR" 2>/dev/null | tr '\n' ' ')"
+	else
+		echo "3DS passthrough: unavailable (${err:-no error reported})"
+	fi
+}
+
+stop() {
+	umount "$DIR" 2>/dev/null
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

@@ -413,7 +413,73 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
   return true;
 }
 
+/* Backing store for the guest's swap device (/dev/vdb). Guest RAM is only
+   whatever the 3DS heap could spare (8-64MB, see the malloc loop in main),
+   so this is what keeps anything nontrivial from being OOM-killed.
+   Created fresh each launch and removed on exit, so it never becomes a
+   stale file the user has to know about.
+
+   Note this is deliberately *not* zero-filled: the file is created by
+   seeking to the last byte and writing there, which costs nothing beyond
+   allocating the space. Swap only ever reads back pages it wrote itself,
+   so whatever the filesystem leaves in the gap is never observed. Some SD
+   filesystems don't extend a file that way, so the result is verified and
+   falls back to an explicit (slow, one-time) zero-fill. */
+#define SWAP_PATH        "sdmc:/swap.img"
+#define SWAP_SIZE_BYTES  (64u * 1024u * 1024u)
+
+static FILE *CreateSwapFile(uint64_t *present_tick) {
+  FILE *f = fopen(SWAP_PATH, "w+b");
+  if (!f) return NULL;
+
+  if (fseek(f, (long)SWAP_SIZE_BYTES - 1, SEEK_SET) == 0 && fputc(0, f) != EOF) {
+    fflush(f);
+    fseek(f, 0, SEEK_END);
+    if ((uint64_t)ftell(f) == SWAP_SIZE_BYTES) { rewind(f); return f; }
+  }
+
+  /* Sparse extend didn't take: write the whole thing out, with progress,
+     the same way the first-boot rootfs extraction reports itself. Small
+     stack buffer rather than a static one - this path is rare, SD
+     throughput dominates the loop anyway, and any permanent buffer here
+     comes straight out of the heap the guest's RAM is carved from. */
+  uint8_t zeros[4096];
+  memset(zeros, 0, sizeof(zeros));
+  rewind(f);
+  term_printf("Creating swap file (%luMB)...\n", (unsigned long)(SWAP_SIZE_BYTES >> 20));
+  PresentTopScreen(present_tick);
+  uint32_t written = 0, last_mb = 0;
+  while (written < SWAP_SIZE_BYTES) {
+    uint32_t n = SWAP_SIZE_BYTES - written;
+    if (n > sizeof(zeros)) n = sizeof(zeros);
+    if (fwrite(zeros, n, 1, f) != 1) {
+      fclose(f);
+      remove(SWAP_PATH);
+      return NULL;
+    }
+    written += n;
+    if ((written >> 20) >= last_mb + 16) {
+      last_mb = written >> 20;
+      term_printf("  ... %luMB / %luMB\n", (unsigned long)last_mb,
+                  (unsigned long)(SWAP_SIZE_BYTES >> 20));
+      PresentTopScreen(present_tick);
+    }
+  }
+  fflush(f);
+  rewind(f);
+  return f;
+}
+
 static FILE *dbg_log_file = NULL;
+
+/* File-scope so every exit path (including the `goto wait_exit`s that fire
+   before it's even created) can clean it up unconditionally. */
+static FILE *swap_file = NULL;
+
+static void CloseSwapFile(void) {
+  if (swap_file) { fclose(swap_file); swap_file = NULL; }
+  remove(SWAP_PATH);
+}
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
 static uint32_t HandleControlStore(uint32_t addy, uint32_t val);
@@ -436,6 +502,8 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 #include "virtio_blk.h"
 #include "virtio_rng.h"
 #include "virtio_net.h"
+#include "virtio_9p.h"
+#include "virtio_input.h"
 #include "rtc_goldfish.h"
 
 static int sbi_shutdown_requested = 0;
@@ -524,16 +592,21 @@ static uint32_t HandleException(uint32_t ir, uint32_t retval) {
   return retval;
 }
 static uint32_t HandleControlStore(uint32_t addy, uint32_t val) {
+  vblk_dev_t *bd;
   if (addy == 0x10000000) WriteUARTByte((char)val);
   else if (addy == 0x11004004) core->timermatchh = val;
   else if (addy == 0x11004000) core->timermatchl = val;
   else if (addy == 0x11100000) { core->pc += 4; return val; }
-  else if (addy >= VIRTIO_BLK_BASE && addy < VIRTIO_BLK_BASE + VIRTIO_BLK_SIZE)
-    vblk_store(addy, val, ram_image);
+  else if ((bd = vblk_for_addr(addy)) != NULL)
+    vblk_store(bd, addy, val, ram_image);
   else if (addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
     vnet_store(addy, val, ram_image);
   else if (addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
     vrng_store(addy, val, ram_image);
+  else if (addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
+    v9p_store(addy, val, ram_image);
+  else if (addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
+    vinput_store(addy, val, ram_image);
   else if (addy >= RTC_GOLDFISH_BASE && addy < RTC_GOLDFISH_BASE + RTC_GOLDFISH_SIZE)
     rtc_goldfish_store(addy, val);
   else if (addy >= PLIC_BASE && addy < PLIC_BASE + PLIC_SIZE)
@@ -541,16 +614,21 @@ static uint32_t HandleControlStore(uint32_t addy, uint32_t val) {
   return 0;
 }
 static uint32_t HandleControlLoad(uint32_t addy) {
+  vblk_dev_t *bd;
   if (addy == 0x10000005) return 0x60 | IsKBHit();
   else if (addy == 0x10000000 && IsKBHit()) return ReadKBByte();
   else if (addy == 0x1100bffc) return core->timerh;
   else if (addy == 0x1100bff8) return core->timerl;
-  else if (addy >= VIRTIO_BLK_BASE && addy < VIRTIO_BLK_BASE + VIRTIO_BLK_SIZE)
-    return vblk_load(addy);
+  else if ((bd = vblk_for_addr(addy)) != NULL)
+    return vblk_load(bd, addy);
   else if (addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
     return vnet_load(addy);
   else if (addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
     return vrng_load(addy);
+  else if (addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
+    return v9p_load(addy);
+  else if (addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
+    return vinput_load(addy);
   else if (addy >= RTC_GOLDFISH_BASE && addy < RTC_GOLDFISH_BASE + RTC_GOLDFISH_SIZE)
     return rtc_goldfish_load(addy);
   else if (addy >= PLIC_BASE && addy < PLIC_BASE + PLIC_SIZE)
@@ -626,14 +704,37 @@ int main(int argc, char **argv) {
   uint64_t disk_size = (uint64_t)ftell(disk_file);
   fseek(disk_file, 0, SEEK_SET);
   plic_init();
-  vblk_init(disk_file, disk_size);
+  vblk_init(0, disk_file, disk_size, VIRTIO_BLK_BASE, PLIC_SRC_BLK);
   term_printf("Disk: %s (%lluMB)\n", disk_path, (unsigned long long)(disk_size >> 20));
+
+  /* Swap is optional: if the file can't be created (full SD, read-only
+     card), instance 1 keeps base == 0, nothing answers at 0x10005000, and
+     the guest's init script falls back to zram. */
+  swap_file = CreateSwapFile(&last_present_tick);
+  if (swap_file) {
+    vblk_init(1, swap_file, SWAP_SIZE_BYTES, VIRTIO_BLK2_BASE, PLIC_SRC_SWAP);
+    term_printf("Swap: %luMB (%s)\n", (unsigned long)(SWAP_SIZE_BYTES >> 20), SWAP_PATH);
+  } else {
+    term_printf("Swap: unavailable (guest falls back to zram)\n");
+  }
 
   vrng_init();
   term_printf("Hardware RNG: %s\n", vrng.ps_ready ? "ok" : "unavailable (fallback)");
 
   vnet_init();
   term_printf("Network: %s\n", vnet.soc_ready ? "ok (NAT via 3DS WiFi)" : "unavailable");
+
+  /* Passthrough + sensors. The NAND trees need extended homebrew
+     permissions; without them they're simply absent and the guest's
+     mount of them fails rather than the whole device disappearing. */
+  v9p_init();
+  term_printf("Passthrough: sd hw%s%s\n",
+              v9p_tree_ok[V9P_TREE_NAND] ? " nand" : "",
+              v9p_tree_ok[V9P_TREE_TWL]  ? " twl"  : "");
+
+  vinput_init();
+  term_printf("Sensors: %s\n", hw.sensors ? "ok (accel, gyro, sliders)"
+                                          : "unavailable");
 
   /* The RISC-V Linux Image header's image_load_offset field (8-byte LE at
      file offset 8) says how far into RAM the bootloader must place byte 0
@@ -941,6 +1042,10 @@ int main(int argc, char **argv) {
              svcGetSystemTick() - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
 
     vnet_poll(ram_image);
+    /* Sensor sampling piggybacks on the hidScanInput() already done at the
+       top of this loop, so it costs a handful of comparisons per frame and
+       naturally runs at the console's own refresh rate. */
+    vinput_poll(ram_image);
 
     if (ret == 0x5555 || ret == 3 || sbi_shutdown_requested) {
       if (ret == 3) term_printf("Emulator fault!\n");
@@ -961,6 +1066,8 @@ int main(int argc, char **argv) {
   }
 
   if (disk_file) fclose(disk_file);
+  CloseSwapFile();
+  v9p_exit();
   if (vnet.soc_ready) socExit();
   if (vrng.ps_ready) psExit();
   free(ram_image);
@@ -975,6 +1082,7 @@ wait_exit:
     term_draw(&term_state, top_fb);
     gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
   }
+  CloseSwapFile();
   free(ram_image);
   gfxExit();
   return -1;

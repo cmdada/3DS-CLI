@@ -2,9 +2,11 @@
 
 Run a real RISC-V Linux environment inside the Nintendo 3DS homebrew launcher.
 
-3DS-CLI embeds [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima), a compact
-RISC-V CPU emulator, into a 3DS homebrew app. It boots a Linux image from the SD
-card while still running inside the normal 3DS Horizon OS.
+3DS-CLI embeds [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu),
+a fork of cnlohr's compact mini-rv32ima RISC-V emulator extended with a full
+Sv32 MMU, S-mode, and a built-in SBI, into a 3DS homebrew app. It boots a
+stock RV32 Linux kernel (6.6, glibc userspace, real virtual memory - no NOMMU
+hacks) from the SD card while still running inside the normal 3DS Horizon OS.
 
 ![3DS-CLI running on a Nintendo 3DS](example.jpg)
 
@@ -13,9 +15,21 @@ card while still running inside the normal 3DS Horizon OS.
 - Boots a RISC-V Linux image on 3DS hardware through software emulation.
 - Displays a custom ANSI/xterm terminal emulator on the top screen with full 16/256/24-bit colour support, zoom, and viewport panning.
 - Provides a custom bottom-screen touch keyboard for typing commands.
-- Includes a prebuilt image with BusyBox tools, a JavaScript runtime, and CLI Doom.
+- Persists real changes to a real filesystem: the root filesystem is a
+  virtio-blk device backed directly by `rootfs.ext2` on the SD card, so
+  writes go straight to disk as they happen — nothing is lost if the app
+  crashes or the console loses power, and there's no RAM snapshot to save.
+- Gets you online: a virtio-net device NATs the guest out through the 3DS's
+  real WiFi connection (DHCP, TCP, UDP, DNS all work; see
+  [Networking](#networking) below for exact scope).
+- Feeds the guest kernel real hardware entropy (virtio-rng, from the 3DS's
+  hardware RNG) and the real date/time (a goldfish-rtc device backed by the
+  3DS's hardware clock) instead of emulator defaults.
+- Includes a prebuilt image with bash, htop, neofetch, nano, vim, tree, wget,
+  dropbear (ssh), and the usual BusyBox/util-linux tools.
 - Can be used as a starting point for testing custom RISC-V Linux images, kernels,
-  and Buildroot experiments on a 3DS.
+  and Buildroot experiments on a 3DS — the `buildroot/` directory in this repo
+  builds the kernel `Image` and `rootfs.ext2` from scratch.
 
 ## Installation
 
@@ -23,13 +37,30 @@ card while still running inside the normal 3DS Horizon OS.
 Install directly on your 3DS via [Universal Updater](https://db.universal-team.net/3ds/3ds-cli): find 3DS-CLI in the app and it will handle downloading and placing the files for you.
 
 ### Option 2: Manual
-1. Download `3DS-CLI_Install.zip` from the latest GitHub release.
-2. Unzip the archive.
-3. Copy `3ds-cli.3dsx` and `Image` into the `3ds/` folder on your SD card
-4. Launch 3DS-CLI from the Homebrew Launcher.
-5. Wait for Linux to boot. On my SDXC card it takes about 2.2 seconds to reach the
-   login prompt.
-6. Log in as `root` with a blank password.
+1. Download the zip from the latest GitHub release.
+2. Copy `3ds-cli.3dsx` to `sdmc:/3ds/` and `Image` to the root of your SD card.
+   That's the whole install — the root filesystem is bundled inside `Image`,
+   and the app unpacks it to `sdmc:/rootfs.ext2` on first boot.
+3. Launch 3DS-CLI from the Homebrew Launcher and wait for Linux to boot
+   (the first boot takes longer because of the rootfs unpack).
+4. Log in as `root` with a blank password.
+5. Anything you write to disk (files, package installs, config changes) persists
+   directly into `rootfs.ext2` — no separate save step needed. Delete that file
+   if you ever want a factory reset; it gets recreated on the next boot.
+
+## Networking
+
+If the 3DS is connected to WiFi, the guest gets a DHCP lease on a private
+`10.0.2.0/24` subnet (gateway `10.0.2.2`) and outbound TCP/UDP/DNS traffic is
+NAT'd out through the console's real connection — `wget`, `dropbear`/`ssh`,
+`ntpd`, etc. all work. Two caveats, both inherent to running as unprivileged
+3DS homebrew (no raw sockets):
+
+- `ping`/ICMP only gets a reply from the gateway (`10.0.2.2`) itself, as a
+  reachability check of the emulator's NAT layer — it can't reach real
+  internet hosts.
+- No inbound connections: the 3DS isn't reachable from the network, only the
+  reverse.
 
 ## Controls
 
@@ -41,7 +72,7 @@ Install directly on your 3DS via [Universal Updater](https://db.universal-team.n
 | **ZR** | Toggle font (8x8 ↔ 5x7 compact) |
 | **Circle Pad** | Pan viewport (also disables auto-follow) |
 | **D-Pad** | Send arrow keys to Linux |
-| **START** | Save Linux state, quit, and return to Homebrew Launcher |
+| **START** | Quit and return to Homebrew Launcher (disk writes are already persisted live) |
 
 | Key | Action |
 |---|---|
@@ -60,10 +91,41 @@ Install directly on your 3DS via [Universal Updater](https://db.universal-team.n
 Install devkitPro with devkitARM and libctru, then run:
 
 ```sh
-make
+make        # builds 3ds-cli.3dsx
+make cia    # also builds 3ds-cli.cia (needs bannertool + makerom)
 ```
 
-The app builds as `3ds-cli.3dsx`.
+If you change `source/3ds-cli.dts` (e.g. to add a new emulated device), regenerate
+the embedded device tree blob with `make dtb` (needs `dtc` and `python3`).
+
+### Building the guest kernel and rootfs
+
+`buildroot/` is a self-contained Buildroot external tree that produces `Image`
+(the RISC-V kernel) and `rootfs.ext2` (the disk image the app boots from):
+
+```sh
+# Fetch upstream Buildroot once (or point at your own checkout):
+wget https://buildroot.org/downloads/buildroot-2024.02.9.tar.gz
+tar xf buildroot-2024.02.9.tar.gz -C buildroot-native
+
+cd buildroot-native/buildroot-2024.02.9
+make BR2_EXTERNAL=../../buildroot O=../../buildroot-native-output 3ds_defconfig
+make O=../../buildroot-native-output
+```
+
+Kernel config lives in `board/3ds-cli/linux.config`; userspace package
+selection is in `configs/3ds_defconfig`. Outputs land in
+`buildroot-native-output/images/`.
+
+To bundle the two into the single release-style `Image` (kernel + gzipped
+rootfs, unpacked to the SD card by the app on first boot):
+
+```sh
+python3 tools/mkimage.py Image rootfs.ext2 Image-combined
+```
+
+A plain kernel `Image` with a separate `rootfs.ext2` on the SD card keeps
+working too, which is handier while iterating on the rootfs.
 
 ## Star History
 
@@ -78,7 +140,8 @@ The app builds as `3ds-cli.3dsx`.
 ## Credits
 
 - Built with [devkitARM / libctru](https://github.com/devkitPro/libctru)
-- Powered by [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) by cnlohr
+- Powered by [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu),
+  a fork of [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) by cnlohr
 
 ## License
 

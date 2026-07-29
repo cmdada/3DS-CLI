@@ -1,22 +1,78 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - "**"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and release
+
+  # ── Buildroot: kernel Image + rootfs.ext2 ─────────────────────────────────
+  buildroot:
+    name: Build Linux (Buildroot RV32 Sv32 MMU)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc cpio file rsync unzip wget \
+            libncurses-dev libssl-dev python3 bison flex \
+            device-tree-compiler
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: buildroot-dl
+          key: buildroot-dl-${{ hashFiles('buildroot/configs/3ds_defconfig') }}
+          restore-keys: buildroot-dl-
+
+      - name: Download Buildroot
+        run: |
+          BR_VER=2024.02.9
+          wget -q "https://buildroot.org/downloads/buildroot-${BR_VER}.tar.gz"
+          tar -xzf "buildroot-${BR_VER}.tar.gz"
+          echo "BR_DIR=$(pwd)/buildroot-${BR_VER}" >> $GITHUB_ENV
+
+      - name: Configure and build
+        run: |
+          cd "$BR_DIR"
+          BR2_EXTERNAL="$(pwd)/../buildroot" \
+            make BR2_DL_DIR="$(pwd)/../buildroot-dl" \
+                 O="$(pwd)/../buildroot-output" \
+                 3ds_defconfig
+          cd ../buildroot-output
+          make BR2_DL_DIR="$(pwd)/../buildroot-dl" -j$(nproc)
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p release-linux
+          cp buildroot-output/images/Image        release-linux/Image
+          cp buildroot-output/images/rootfs.ext4  release-linux/rootfs.ext2
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-rv32
+          path: release-linux/
+          retention-days: 1
+
+  # ── devkitARM: 3dsx + CIA ─────────────────────────────────────────────────
+  threeds:
+    name: Build 3DS homebrew
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install CIA build tools
         run: |
@@ -30,17 +86,104 @@ jobs:
           cp /tmp/Project_CTR/makerom/bin/makerom /usr/local/bin/
           chmod +x /usr/local/bin/makerom
 
+      - name: Regenerate DTB header
+        run: |
+          apt-get install -y -qq device-tree-compiler
+          python3 - << 'EOF'
+          import subprocess, struct, re, sys
+
+          result = subprocess.run(
+              ['dtc', '-I', 'dts', '-O', 'dtb', '-o', '/tmp/new.dtb', 'source/3ds-cli.dts'],
+              capture_output=True
+          )
+          if result.returncode != 0:
+              print(result.stderr.decode(), file=sys.stderr)
+              sys.exit(1)
+
+          with open('/tmp/new.dtb', 'rb') as f:
+              data = bytearray(f.read())
+
+          sentinel = bytes([0xde, 0xad, 0xc0, 0xde])
+          offset = data.find(sentinel)
+          if offset == -1:
+              print("sentinel not found in DTB", file=sys.stderr)
+              sys.exit(1)
+
+          lines = ["static const unsigned char default64mbdtb[] = {"]
+          row = []
+          for b in data:
+              row.append(f"0x{b:02x}")
+              if len(row) == 16:
+                  lines.append(", ".join(row) + ",")
+                  row = []
+          if row:
+              lines.append(", ".join(row))
+          lines.append("};")
+          lines.append(f"#define DTB_MEM_SIZE_OFFSET {offset}")
+
+          with open('source/default64mbdtc.h', 'w') as f:
+              f.write("\n".join(lines) + "\n")
+          print(f"DTB regenerated ({len(data)} bytes, sentinel at {offset:#x})")
+          EOF
+
       - name: Build 3DSX and CIA
         run: make && make cia
+
+      - name: Upload 3DS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: threeds-homebrew
+          path: |
+            3ds-cli.3dsx
+            3ds-cli.cia
+          retention-days: 1
+
+  # ── Package and release ───────────────────────────────────────────────────
+  release:
+    name: Package release
+    needs: [buildroot, threeds]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-rv32
+          path: release/
+
+      - name: Download 3DS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: threeds-homebrew
+          path: release/
 
       - name: Set release variables
         id: vars
         run: echo "short_sha=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
-      - name: Package release asset
+      # Bundle the rootfs into the Image so the whole install is just the
+      # 3dsx plus one Image file - the app inflates rootfs.ext2 to the SD
+      # card on first boot and uses that writable copy from then on.
+      - name: Bundle rootfs into Image
         run: |
-          rm -f 3ds_cli.zip
-          zip -j 3ds_cli.zip 3ds-cli.3dsx 3ds-cli.cia Image
+          python3 tools/mkimage.py release/Image release/rootfs.ext2 release/Image-combined
+          mv release/Image-combined release/Image
+          rm release/rootfs.ext2
+
+      - name: Package release ZIP
+        run: |
+          cd release
+          zip -j ../3ds_cli.zip 3ds-cli.3dsx 3ds-cli.cia Image
+          echo "SD card layout:" >> ../README_sdcard.txt
+          echo "  sdmc:/Image         ← RISC-V kernel + embedded rootfs" >> ../README_sdcard.txt
+          echo "  sdmc:/3ds/3ds-cli.3dsx" >> ../README_sdcard.txt
+          echo "" >> ../README_sdcard.txt
+          echo "rootfs.ext2 is created on the SD card automatically on first boot." >> ../README_sdcard.txt
+          cd ..
+          zip 3ds_cli.zip README_sdcard.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -50,3 +193,14 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: 3ds_cli.zip
           make_latest: true
+          body: |
+            ## SD Card Setup
+            Extract the zip and copy to your SD card:
+            - `Image` → `sdmc:/Image`
+            - `3ds-cli.3dsx` → `sdmc:/3ds/3ds-cli/3ds-cli.3dsx`
+
+            The Image has the root filesystem bundled in: on first boot the app
+            unpacks it to `sdmc:/rootfs.ext2`, which stays as the writable disk
+            from then on - changes persist across sessions.
+            Includes: bash, htop, neofetch, nano, vim, tree, wget, dropbear,
+            procps, util-linux.

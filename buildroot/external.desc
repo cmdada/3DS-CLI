@@ -1,0 +1,2 @@
+name: 3DS_CLI
+desc: 3DS-CLI Linux environment (RV32IMA NOMMU, virtio-blk rootfs)

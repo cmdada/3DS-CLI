@@ -5,6 +5,14 @@ build/
 *.elf
 *.cia
 *.bnr
+rootfs.ext2
+
+# Buildroot (guest kernel/rootfs build tree — huge, fetched/generated locally)
+buildroot-native/
+buildroot-native-output/
+buildroot/output/
+buildroot/dl/
+buildroot/build/
 
 # Old branding
 3dssh.json

@@ -38,7 +38,7 @@ APP_AUTHOR		:=	cmdada
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include vendor/mini-rv32ima-mmu
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 #ROMFS		:=	romfs
@@ -60,13 +60,13 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lctru -lm
+LIBS	:= -lz -lctru -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(CTRULIB)
+LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 
 
 #---------------------------------------------------------------------------------
@@ -169,11 +169,24 @@ export BANNER_AUDIO := $(TOPDIR)/silence.wav
 export BANNER       := $(TOPDIR)/banner.bnr
 export APP_RSF      := $(TOPDIR)/app.rsf
 
-.PHONY: all clean cia
+.PHONY: all clean cia dtb
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+#---------------------------------------------------------------------------------
+# Regenerate source/default64mbdtc.h from source/3ds-cli.dts (requires dtc + python3)
+dtb:
+	@dtc -I dts -O dtb -o /tmp/3ds-cli.dtb source/3ds-cli.dts
+	@python3 -c "\
+import struct, sys; \
+data = bytearray(open('/tmp/3ds-cli.dtb','rb').read()); \
+off = data.find(bytes([0xde,0xad,0xc0,0xde])); \
+assert off != -1, 'sentinel 0xdeadc0de not found in DTB'; \
+rows = [', '.join(f'0x{b:02x}' for b in data[i:i+16]) for i in range(0, len(data), 16)]; \
+open('source/default64mbdtc.h','w').write('static const unsigned char default64mbdtb[] = {\n' + ',\n'.join(rows) + '\n};\n#define DTB_MEM_SIZE_OFFSET ' + str(off) + '\n'); \
+print(f'DTB: {len(data)} bytes, patch offset {off:#x}')"
 
 cia: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile cia

@@ -1,0 +1,3 @@
+[submodule "vendor/mini-rv32ima-mmu"]
+	path = vendor/mini-rv32ima-mmu
+	url = https://github.com/cmdada/mini-rv32ima-mmu.git

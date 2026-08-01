@@ -69,10 +69,40 @@ NAT'd out through the console's real connection — `wget`, `dropbear`/`ssh`,
 - No inbound connections: the 3DS isn't reachable from the network, only the
   reverse.
 
+## Console models
+
+Runs on both. The app checks the model at startup and prints what it decided
+as the first line of the boot log (`Model: New3DS (full UI)` /
+`Model: Old3DS (reduced UI)`), so a bug report only needs that line to say
+which set of limits was in play.
+
+On a **New 3DS**, the emulator gets core 2 — a spare application core — to
+itself, the CPU runs at 804MHz with the L2 cache enabled, and the UI redraws
+at 30fps.
+
+On an **Old 3DS** there is no spare core, so the emulator shares the system
+core with the app's own input and rendering, at 268MHz with no speedup
+available. Everything works, but the app deliberately spends less on itself
+to leave more for the guest: the top screen redraws at ~8fps instead of 30
+and input polls at 30Hz instead of 60. Nothing is disabled — it's the same
+build doing the same things at a cadence nobody watches while a compile runs.
+
+Guest RAM is model-dependent too, and it is the binding constraint on an Old
+3DS. The app takes guest RAM from the application heap, so it asks libctru
+for only 8MB of linear heap (framebuffers and audio buffers, the only things
+that need to be linear) instead of the default split, which would otherwise
+reserve up to 32MB that the guest could never use. What's left over is what
+Linux gets: ~54MB usable on a New 3DS, ~20MB on an Old 3DS.
+
+If you see `Image too large for RAM`, the kernel `Image` on the SD card
+wants more memory than the app could allocate — update `Image` and the app
+to the same release together. Kernels built before mid-2026 needed ~29MB of
+guest RAM all by themselves and cannot boot on an Old 3DS at all.
+
 ## Swap
 
-Guest RAM is whatever the app can get from the 3DS heap — 64MB at best, and
-less on Old 3DS models, where the allocator settles for whatever it can find.
+Guest RAM is whatever the app can get from the 3DS heap — see
+[Console models](#console-models) above.
 To keep that from being a hard ceiling, the app exposes a second virtio-blk
 device (`/dev/vdb`) backed by a 64MB `sdmc:/swap.img`, which the guest turns
 into swap at boot.

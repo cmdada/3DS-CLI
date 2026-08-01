@@ -10,6 +10,13 @@
 
 TermState term_state;
 
+u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
+
+/* New3DS or Old3DS, from APT_CheckNew3DS at startup. Both the emulator
+   thread's core choice and the main thread's UI cadence depend on it - see
+   g_top_refresh_us below and the threadCreate call in main(). */
+static bool g_new_3ds = false;
+
 static void term_printf(const char *format, ...) {
   char buf[512];
   va_list args;
@@ -278,6 +285,9 @@ void draw_keyboard() {
 #include "default64mbdtc.h"
 
 uint32_t ram_amt = 64 * 1024 * 1024;
+// Smallest amount of RAM left over after the kernel image that's worth
+// trying to boot on - see the size check in main().
+#define MIN_GUEST_FREE_RAM (8 * 1024 * 1024)
 uint8_t *ram_image = 0;
 struct MiniRV32IMAState *core;
 
@@ -292,7 +302,30 @@ struct MiniRV32IMAState *core;
 // times as many timer interrupts, each a full trap round-trip through the
 // SBI forwarding in HandleException. Left coarse deliberately.
 #define EMU_STEP_CHUNK 200000
-#define TOP_REFRESH_INTERVAL_US 33000
+
+/* UI cadence, set once from g_new_3ds at startup.
+
+   These are the two things the main thread does forever: redraw the top
+   screen and poll input. On a New3DS neither matters - the emulator has
+   core 2 to itself, so the main thread can spend core 0 however it likes
+   and 30fps/60Hz is simply the nicest UI. On an Old 3DS there is no core 2
+   (see the threadCreate call in main), so the emulator lands on the system
+   core and this thread's every wakeup competes with guest execution for
+   real. Redrawing the terminal is the expensive half by a wide margin: it's
+   a per-cell software blit of an 80x30 grid into the 400x240 framebuffer,
+   on a 268MHz ARM11 with no speedup available (osSetSpeedupEnable is
+   New3DS-only), and it happens whether the guest is doing anything or not.
+
+   So the Old 3DS runs the same code at a coarser cadence - ~8fps redraw,
+   30Hz input - trading UI smoothness, which nobody watches while a kernel
+   compiles, for guest throughput, which is the whole point of the app.
+   Input stays well above the ~10Hz where a touch keyboard starts dropping
+   taps. This is why an Old 3DS is slower-but-working rather than an
+   unusable version of the same thing. */
+static uint32_t g_top_refresh_us  = 33000;      /* ~30fps */
+static uint32_t g_input_poll_ns   = 1000000000LL / 60;
+#define TOP_REFRESH_INTERVAL_US_O3DS 120000     /* ~8fps  */
+#define INPUT_POLL_NS_O3DS (1000000000LL / 30)
 // How often the guest console mirror on the SD card is actually committed.
 // See WriteUARTByte for why this is time-based rather than per-line.
 #define UART_LOG_FLUSH_INTERVAL_US 500000
@@ -869,8 +902,17 @@ int main(int argc, char **argv) {
   LightLock_Init(&hid_ipc_lock);
 
   gfxInitDefault();
+  /* New3DS-only: 804MHz instead of 268MHz, plus the L2 cache. A no-op that
+     simply fails on an Old 3DS, which is the single biggest reason that
+     model needs the cheaper UI cadence selected just below. */
   osSetSpeedupEnable(true);
   gfxSetDoubleBuffering(GFX_BOTTOM, false);
+
+  APT_CheckNew3DS(&g_new_3ds);
+  if (!g_new_3ds) {
+    g_top_refresh_us = TOP_REFRESH_INTERVAL_US_O3DS;
+    g_input_poll_ns  = INPUT_POLL_NS_O3DS;
+  }
 
   term_init(&term_state);
   // Bottom screen: direct framebuffer (no consoleInit)
@@ -895,6 +937,11 @@ int main(int argc, char **argv) {
     goto wait_exit;
   }
 
+  /* Both halves of this line are the first thing worth knowing from a bug
+     report: which model's limits apply, and how much RAM the guest actually
+     got - issue #5 was diagnosed off exactly these numbers. */
+  term_printf("Model: %s (%s UI)\n", g_new_3ds ? "New3DS" : "Old3DS",
+              g_new_3ds ? "full" : "reduced");
   term_printf("Allocated %lu bytes for RAM.\n", ram_amt);
 
   /* Open kernel Image (possibly a combined kernel+rootfs bundle) */
@@ -973,13 +1020,40 @@ int main(int argc, char **argv) {
      actual entry code 4MB away from where pc gets set, so the CPU starts
      executing whatever unrelated bytes happen to be at the front of the
      file instead - which decodes as an immediate illegal instruction. */
-  uint64_t image_load_offset = 0;
+  uint64_t image_load_offset = 0, image_size = 0;
   fseek(f, 8, SEEK_SET);
   if (fread(&image_load_offset, sizeof(image_load_offset), 1, f) != 1) image_load_offset = 0;
+  /* image_size (the next 8-byte LE field) is what the kernel will actually
+     occupy once running - _end minus _start, so it counts BSS, which isn't
+     in the file at all. Checking the file length instead under-counts, and
+     for a kernel that squeaks past the check that means Linux silently
+     zeroes its BSS over whatever follows. Fall back to the file length if
+     the field is absent or nonsense (a 0 image_size is what pre-4.15
+     RV32 kernels wrote). */
+  if (fread(&image_size, sizeof(image_size), 1, f) != 1) image_size = 0;
+  if (image_size < (uint64_t)flen) image_size = (uint64_t)flen;
   fseek(f, 0, SEEK_SET);
 
-  if (flen + (long)image_load_offset > (long)(ram_amt - 4*1024*1024)) {
+  /* The DTB and the emulator's own CPU state sit at the very top of RAM
+     (see the block below), and Linux needs a working amount of memory left
+     over after the kernel image itself: page tables and the struct page
+     array alone scale with the size of the RAM it's given, and everything
+     from the slab to the page cache comes out of what's left. Under ~8MB
+     free it either panics during boot or OOM-kills init the moment it gets
+     one. */
+  uint32_t kernel_top = (uint32_t)(image_load_offset + image_size);
+  uint32_t reserved_top = sizeof(default64mbdtb) + sizeof(struct MiniRV32IMAState);
+  if ((uint64_t)kernel_top + reserved_top + MIN_GUEST_FREE_RAM > (uint64_t)ram_amt) {
     term_printf("Image too large for RAM.\n");
+    term_printf("  kernel wants %luMB at +%luMB, RAM is %luMB.\n",
+                (unsigned long)(image_size >> 20),
+                (unsigned long)(image_load_offset >> 20),
+                (unsigned long)(ram_amt >> 20));
+    /* Kept under 50 columns: that's all of the 80-column grid the top
+       screen actually shows at the default zoom (8px glyphs, 400px wide),
+       and an error nobody can read without scrolling isn't one. */
+    term_printf("  Update Image and the app together: older\n"
+                "  kernels needed ~29MB of guest RAM.\n");
     fclose(f); fclose(disk_file); goto wait_exit;
   }
   memset(ram_image, 0, ram_amt);
@@ -1058,11 +1132,20 @@ int main(int argc, char **argv) {
   // APT_SetAppCpuTimeLimit to succeed. Try core 2 first, fall back to
   // core 1, and if neither works, fall back further to just not creating
   // the thread at all - see below.
+  //
+  // Core 2 is only *asked* for on a console that has one. An Old 3DS has
+  // cores 0 and 1 and nothing else, and while its kernel does just fail the
+  // svcCreateThread (leaving the fallback below to do its job), asking at
+  // all means handing an out-of-range processor id to whatever is running
+  // this - Azahar in Old 3DS mode aborts on an assertion rather than
+  // returning an error, which is how this surfaced.
 #define EMU_THREAD_STACK_SIZE (32 * 1024)
   s32 main_thread_prio = 0x30;
   svcGetThreadPriority(&main_thread_prio, CUR_THREAD_HANDLE);
-  Thread emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 2, false);
+  Thread emu_thread = NULL;
   const char *emu_core_desc = "New3DS core 2";
+  if (g_new_3ds)
+    emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 2, false);
   if (!emu_thread) {
     if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))) {
       emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 1, false);
@@ -1250,7 +1333,7 @@ int main(int argc, char **argv) {
       break;
     }
 
-    if (TimeSinceUs(last_present_tick, TOP_REFRESH_INTERVAL_US)) {
+    if (TimeSinceUs(last_present_tick, g_top_refresh_us)) {
       if (term_state.dirty) {
         PresentTopScreen(&last_present_tick);
       }
@@ -1258,7 +1341,8 @@ int main(int argc, char **argv) {
 
     // Nothing CPU-heavy left to do on this thread each iteration now that
     // emulation runs elsewhere - yield briefly instead of spinning flat
-    // out just to poll input/vblank state. ~60Hz is plenty for a touch UI.
+    // out just to poll input/vblank state. ~60Hz is plenty for a touch UI
+    // (30Hz on an Old 3DS - see g_input_poll_ns).
     //
     // svcSleepThread takes NANOseconds. This was 1000000LL/60, i.e. 16.7us,
     // which polled input roughly a thousand times more often than the 60Hz
@@ -1266,7 +1350,7 @@ int main(int argc, char **argv) {
     // New3DS that core is otherwise idle so it merely wastes power, but on an
     // Old 3DS this thread shares the system core with the emulator and every
     // one of those wakeups came straight out of guest execution time.
-    svcSleepThread(1000000000LL / 60);
+    svcSleepThread(g_input_poll_ns);
   }
 
   // Stop and join the emu thread before touching anything it owns

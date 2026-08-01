@@ -13,11 +13,37 @@ jobs:
     name: Build Linux (Buildroot RV32 Sv32 MMU)
     runs-on: ubuntu-latest
 
+    env:
+      # Also part of the images cache key below, so bumping this rebuilds
+      # rather than restoring images built by the old version.
+      BR_VER: 2024.02.9
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # The kernel Image and rootfs are a pure function of the buildroot/
+      # tree and the pinned Buildroot version: nothing under source/, and
+      # nothing the devkitARM job does, feeds into them. So cache the
+      # finished images against exactly that, and skip the whole build when
+      # it hits. Most releases only touch the homebrew side, and those go
+      # from a ~40 minute toolchain-plus-kernel-plus-rootfs build to a few
+      # seconds of download for byte-identical output.
+      #
+      # Deliberately no restore-keys: a partial match here would hand the
+      # release a kernel built from a *different* config, which is exactly
+      # the mismatch that issue #5 was (an Image and an app that disagreed
+      # about how much RAM the guest needs). Either the inputs hash the same
+      # and the images are known-correct, or we rebuild.
+      - name: Restore prebuilt Linux images
+        id: images
+        uses: actions/cache@v4
+        with:
+          path: release-linux
+          key: linux-rv32-${{ env.BR_VER }}-${{ hashFiles('buildroot/**') }}
+
       - name: Install host dependencies
+        if: steps.images.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -26,6 +52,7 @@ jobs:
             device-tree-compiler
 
       - name: Cache Buildroot downloads
+        if: steps.images.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: buildroot-dl
@@ -33,13 +60,14 @@ jobs:
           restore-keys: buildroot-dl-
 
       - name: Download Buildroot
+        if: steps.images.outputs.cache-hit != 'true'
         run: |
-          BR_VER=2024.02.9
           wget -q "https://buildroot.org/downloads/buildroot-${BR_VER}.tar.gz"
           tar -xzf "buildroot-${BR_VER}.tar.gz"
           echo "BR_DIR=$(pwd)/buildroot-${BR_VER}" >> $GITHUB_ENV
 
       - name: Configure and build
+        if: steps.images.outputs.cache-hit != 'true'
         run: |
           cd "$BR_DIR"
           BR2_EXTERNAL="$(pwd)/../buildroot" \
@@ -50,10 +78,21 @@ jobs:
           make BR2_DL_DIR="$(pwd)/../buildroot-dl" -j$(nproc)
 
       - name: Stage release artifacts
+        if: steps.images.outputs.cache-hit != 'true'
         run: |
           mkdir -p release-linux
           cp buildroot-output/images/Image        release-linux/Image
           cp buildroot-output/images/rootfs.ext4  release-linux/rootfs.ext2
+
+      # Guards against a cache entry that restored but is missing or
+      # truncated - the release would otherwise be published with a broken
+      # Image and only fail on someone's console.
+      - name: Verify Linux images
+        run: |
+          test -s release-linux/Image
+          test -s release-linux/rootfs.ext2
+          echo "source: ${{ steps.images.outputs.cache-hit == 'true' && 'cache' || 'built' }}"
+          ls -l release-linux/
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4

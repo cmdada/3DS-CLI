@@ -130,15 +130,6 @@ Kernel config is `buildroot/board/3ds-cli/linux.config`. Packages are in
 `buildroot/configs/3ds_defconfig`. You can also just put a plain kernel `Image`
 and a separate `rootfs.ext2` on the SD card, which is easier while iterating.
 
-## Star History
-
-<a href="https://www.star-history.com/?repos=cmdada%2F3ds-cli&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cmdada/3ds-cli&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cmdada/3ds-cli&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cmdada/3ds-cli&type=date&legend=top-left" />
- </picture>
-</a>
 
 ## Credits
 

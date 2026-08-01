@@ -508,6 +508,50 @@ static inline void term_draw_char_8x8(u8 *fb, int px, int py, char c, u32 fg, u3
   u8 bg_g = (draw_bg >> 8) & 0xff;
   u8 bb_c = draw_bg & 0xff;
 
+  // Fast path for the default (unzoomed) case, which is also the most
+  // common one. term_draw()'s call-site math (px/py are always multiples
+  // of char_w/char_h, and vis_cols/vis_rows are floor(screen/char_w,h))
+  // guarantees the full 8x8 box lands inside [0,400)x[0,240) whenever
+  // zx==zy==1 for this font specifically - unlike term_draw_char_5x7,
+  // whose 6-column draw loop against a 5-wide stride can touch one column
+  // past the edge even at zoom 1 (see that function), 8x8's loop bounds
+  // match its stride exactly, so the bounds checks below are genuinely
+  // unreachable here and safe to skip along with the zoom loop.
+  if (zx == 1 && zy == 1) {
+    // Everything that does not vary per pixel is hoisted out of the inner
+    // loop. Dim depends only on the cell, underline only on the row, and the
+    // framebuffer offset advances by a constant 720-byte column stride as the
+    // column advances - so the multiply, the three ternaries and the two
+    // branches that used to run for each of the ~96000 pixels drawn per frame
+    // all leave, and what remains is a bit test and three predicated stores.
+    // (Bytes go out B,G,R, matching the framebuffer layout.)
+    u8 on_b = fb_c, on_g = fg_g, on_r = fr;
+    if (flags & TERM_FLAG_DIM) { on_b /= 2; on_g /= 2; on_r /= 2; }
+    bool underline = flags & TERM_FLAG_UNDERLINE;
+
+    for (int row = 0; row < 8; row++) {
+      u32 o = (u32)px * 720u + (u32)(239 - (py + row)) * 3u;
+
+      // Underlined row 7 is solid foreground across the whole cell, lit or
+      // not, and is not dimmed - same as the per-pixel version it replaces.
+      if (underline && row == 7) {
+        for (int col = 0; col < 8; col++, o += 720u) {
+          fb[o] = fb_c; fb[o+1] = fg_g; fb[o+2] = fr;
+        }
+        continue;
+      }
+
+      unsigned char bits = glyph[row];
+      for (int col = 0; col < 8; col++, o += 720u, bits >>= 1) {
+        int lit = bits & 1;
+        fb[o]   = lit ? on_b : bb_c;
+        fb[o+1] = lit ? on_g : bg_g;
+        fb[o+2] = lit ? on_r : br;
+      }
+    }
+    return;
+  }
+
   for (int row = 0; row < 8; row++) {
     unsigned char bits = glyph[row];
     for (int col = 0; col < 8; col++) {
@@ -579,13 +623,48 @@ static inline void term_draw(TermState *ts, u8 *fb) {
   u8 bg_g = (ts->default_bg >> 8) & 0xff;
   u8 bg_b = ts->default_bg & 0xff;
 
-  for (int x = 0; x < 400; x++) {
-    u32 col_off = x * 240 * 3;
-    for (int y = 0; y < 240; y++) {
-      u32 off = col_off + (239 - y) * 3;
-      fb[off] = bg_b;
-      fb[off+1] = bg_g;
-      fb[off+2] = bg_r;
+  // Every visible cell paints its own background across its whole box (see
+  // both term_draw_char_* below - they write a pixel for every position in
+  // the glyph box, foreground or not), so the cell grid already covers
+  // [0,covered_w) x [0,covered_h) completely. The only pixels that still need
+  // clearing are the margins the grid cannot reach, when the screen is not a
+  // whole number of cells wide or tall.
+  //
+  // Clearing all 400x240 first - a 288KB memcpy, at up to 30fps, on the same
+  // thread the touch UI runs on - was therefore almost pure waste: at the
+  // default 8x8 font the grid covers the screen exactly (50x30 cells) and
+  // there is nothing to clear at all.
+  int covered_w = vis_cols * char_w;
+  int covered_h = vis_rows * char_h;
+
+  if (covered_w < 400 || covered_h < 240) {
+    // Each screen column is 240 contiguous BGR pixels (240*3 = 720 bytes) in
+    // this rotated framebuffer layout, and every column gets the same solid
+    // fill - build one column's worth and memcpy it, instead of separate
+    // 3-byte stores through fb_pixel-style indexing. Rebuilt only when the
+    // default background actually changes; 0xffffffff is not a reachable
+    // 24-bit colour, so it is a safe "not built yet" marker.
+    static u8 bg_col[240 * 3];
+    static u32 bg_col_colour = 0xffffffffu;
+    if (bg_col_colour != ts->default_bg) {
+      for (int y = 0; y < 240; y++) {
+        bg_col[y*3] = bg_b; bg_col[y*3+1] = bg_g; bg_col[y*3+2] = bg_r;
+      }
+      bg_col_colour = ts->default_bg;
+    }
+
+    // Bottom margin, for the columns the grid does cover. y runs backwards
+    // within a column here, so rows [covered_h,240) are the *first*
+    // (240-covered_h)*3 bytes of each one.
+    if (covered_h < 240) {
+      size_t bottom = (size_t)(240 - covered_h) * 3;
+      for (int x = 0; x < covered_w; x++) {
+        memcpy(fb + (size_t)x * 240 * 3, bg_col, bottom);
+      }
+    }
+    // Right margin: whole columns.
+    for (int x = covered_w; x < 400; x++) {
+      memcpy(fb + (size_t)x * 240 * 3, bg_col, sizeof(bg_col));
     }
   }
 

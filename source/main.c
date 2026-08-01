@@ -283,22 +283,63 @@ struct MiniRV32IMAState *core;
 
 #define TICKS_PER_US 268
 #define EMU_RUN_BUDGET_US 50000
+// Instructions per MiniRV32IMAStep call. This also sets the resolution of the
+// guest's clock (see the tick handling in EmuStepBatch), so it trades
+// timekeeping accuracy against throughput - and the trade is steeper than it
+// looks. Dropping this to 20000, for a ~10ms guest clock instead of ~100ms,
+// cost 5.6% throughput and raised the guest's own retired-instruction count
+// for the same workload by 8.5%: at 100Hz the kernel then actually takes ten
+// times as many timer interrupts, each a full trap round-trip through the
+// SBI forwarding in HandleException. Left coarse deliberately.
 #define EMU_STEP_CHUNK 200000
 #define TOP_REFRESH_INTERVAL_US 33000
+// How often the guest console mirror on the SD card is actually committed.
+// See WriteUARTByte for why this is time-based rather than per-line.
+#define UART_LOG_FLUSH_INTERVAL_US 500000
 
 char rx_buf[256];
 int rx_head = 0, rx_tail = 0;
 
-static int IsKBHit() { return rx_head != rx_tail; }
+// Guards everything shared between the main (input/render) thread and the
+// emulation thread: the rx_buf keyboard-input ring below, and term_state's
+// emu-owned fields (grid/cursor/scrollback - written by term_write_char on
+// the emu thread, read by term_draw on the main thread). term_state's
+// main-thread-owned fields (zoom/scroll/auto_track/use_5x7) are read and
+// written only ever from the main thread and don't need this lock - see
+// the PresentTopScreen/WriteUARTByte call sites below for what actually
+// needs to be inside it.
+static LightLock ui_lock;
+
+// Serializes calls to HIDUSER_GetSoundVolume, the one HID IPC call issued
+// from both threads: virtio_input.h's vinput_sample_hw() (main thread) and
+// hw3ds.h's /mnt/3ds/hw/slider_volume handler (now on the emu thread, via
+// a guest read through the 9P passthrough). libctru's HID session handle
+// is a single global, and while Horizon IPC sessions are generally fine
+// with concurrent callers from different threads, there's no need to bet
+// on that when serializing this rare, cheap call costs nothing.
+static LightLock hid_ipc_lock;
+
+static int IsKBHit() {
+  LightLock_Lock(&ui_lock);
+  int r = rx_head != rx_tail;
+  LightLock_Unlock(&ui_lock);
+  return r;
+}
 static int ReadKBByte() {
-  if (rx_head == rx_tail) return -1;
-  char c = rx_buf[rx_tail];
-  rx_tail = (rx_tail + 1) % 256;
-  return c;
+  LightLock_Lock(&ui_lock);
+  int result = -1;
+  if (rx_head != rx_tail) {
+    result = rx_buf[rx_tail];
+    rx_tail = (rx_tail + 1) % 256;
+  }
+  LightLock_Unlock(&ui_lock);
+  return result;
 }
 static void rx_push(char c) {
+  LightLock_Lock(&ui_lock);
   int nh = (rx_head + 1) % 256;
   if (nh != rx_tail) { rx_buf[rx_head] = c; rx_head = nh; }
+  LightLock_Unlock(&ui_lock);
 }
 static void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
 
@@ -306,11 +347,31 @@ static uint32_t uart_byte_count = 0;
 static FILE *uart_log_file = NULL; // sdmc:/3ds-cli-console.log mirror of guest console output
 static void WriteUARTByte(char c) {
   uart_byte_count++;
+  LightLock_Lock(&ui_lock);
   term_state.auto_track = true;
   term_write_char(&term_state, c);
+  LightLock_Unlock(&ui_lock);
+  // File I/O below is safe unlocked: uart_log_file is only ever touched
+  // from whichever single thread calls WriteUARTByte (the emu thread once
+  // one exists), never concurrently from two threads.
   if (uart_log_file) {
     fputc(c, uart_log_file);
-    if (c == '\n') fflush(uart_log_file);
+    // Flushing on every newline meant one SD card write per line of guest
+    // console output - several hundred over a boot, each one stalling this
+    // (the emulation) thread on the card for as long as the write takes. The
+    // reason to flush at all is that the log survives a crash or a battery
+    // pull, and a time-based flush keeps essentially all of that value: at
+    // most UART_LOG_FLUSH_INTERVAL_US of output is ever at risk, for a small
+    // fraction of the writes. The stream is still closed explicitly on exit,
+    // so a clean shutdown loses nothing at all.
+    if (c == '\n') {
+      static uint64_t last_flush_tick = 0;
+      uint64_t now = svcGetSystemTick();
+      if (now - last_flush_tick >= (uint64_t)UART_LOG_FLUSH_INTERVAL_US * TICKS_PER_US) {
+        fflush(uart_log_file);
+        last_flush_tick = now;
+      }
+    }
   }
 }
 
@@ -320,12 +381,19 @@ static bool TimeSinceUs(uint64_t last_tick, uint64_t interval_us) {
 
 static void PresentTopScreen(uint64_t *last_present_tick) {
   u8 *top_fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+  // Locked only around the part that actually touches term_state/reads the
+  // grid the emu thread writes - gfxSwapBuffers/gspWaitForVBlank can block
+  // for a while waiting on vsync and must not hold this lock while doing
+  // so, or a burst of guest console output would stall behind a whole
+  // frame's wait for no reason.
+  LightLock_Lock(&ui_lock);
   term_draw(&term_state, top_fb);
+  term_state.dirty = false;
+  LightLock_Unlock(&ui_lock);
   gfxFlushBuffers();
   gfxSwapBuffers();
   gspWaitForVBlank();
   *last_present_tick = svcGetSystemTick();
-  term_state.dirty = false;
 }
 
 static FILE *OpenDiskFile(const char **opened_path) {
@@ -506,7 +574,164 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 #include "virtio_input.h"
 #include "rtc_goldfish.h"
 
-static int sbi_shutdown_requested = 0;
+// Written by the emu thread (HandleSBICall, on an SRST call), read by the
+// main thread's exit check below - volatile so the main thread's compiled
+// loop actually re-reads it each iteration instead of possibly hoisting a
+// cached value out, since nothing in that loop's own code ever writes it.
+static volatile int sbi_shutdown_requested = 0;
+
+// ---------------------------------------------------------
+// Emulation thread
+// ---------------------------------------------------------
+//
+// Runs MiniRV32IMAStep continuously on its own thread (see main() for how
+// it's spawned - New3DS core 2 preferred, system core 1 as a universal
+// fallback) instead of interleaving batches of it with input/render on a
+// single thread as before. This thread, and only this thread, ever touches
+// `core`, `ram_image`, or any virtio/PLIC device state - that's what makes
+// this safe without a much bigger lock around all of memory: the main
+// thread's only interaction with anything this thread owns is through the
+// two locked handoffs below (g_vinput_axes for sensor samples in, g_emu_ret
+// for exit-status out) plus the ui_lock-guarded rx_buf/term_state already
+// covered in WriteUARTByte/PresentTopScreen/rx_push et al.
+static volatile bool g_emu_should_stop = false; // main thread -> emu thread: please stop.
+static volatile int  g_emu_ret = 0;             // emu thread -> main thread: last MiniRV32IMAStep result.
+
+// Written by the main thread (which owns hidScanInput() and everything
+// that depends on its cache - see vinput_sample_hw()'s comment in
+// virtio_input.h), read by the emu thread. Guarded by ui_lock even though
+// it's a plain array with no pointers (so a torn read could at worst show
+// one axis a poll cycle stale, never anything unsafe) - the lock is cheap
+// and this makes that reasoning unnecessary to rely on.
+static int32_t g_vinput_axes[VI_NAXES];
+
+// Runs one batch: a chunk-loop of MiniRV32IMAStep calls up to
+// EMU_RUN_BUDGET_US of wall time or a stopping condition, then services
+// the pollable devices. Returns the same result codes MiniRV32IMAStep does
+// (1 = WFI, 0x5555/3 = shutdown/fault sentinels used by HandleControlStore
+// and the fault path respectively - see their call sites).
+//
+// dbg_log_file below writes a ring buffer of the last DBG_RING_N distinct
+// (pc,mcause) transitions plus a full register dump to
+// sdmc:/3ds-cli-debug.log whenever execution is detected as stuck (200
+// consecutive chunks with zero forward progress), re-arming once forward
+// progress resumes. Cheap enough to leave enabled, and it has paid for
+// itself repeatedly when a guest-side hang needed diagnosing.
+static int EmuStepBatch(uint64_t *last_tick) {
+  int ret = 0;
+  uint64_t now = svcGetSystemTick();
+  uint64_t frame_start = now;
+  static uint32_t dbg_step = 0;
+  static uint32_t dbg_last_pc = 0xffffffffu, dbg_last_mc = 0xffffffffu;
+  static uint32_t dbg_stuck_count = 0;
+  static bool dbg_dumped = false;
+#define DBG_RING_N 512
+  typedef struct { uint32_t step, pc, mc, ep, tv, ra, sp, tp, t4, gp, a0, mstatus; } dbg_rec_t;
+  static dbg_rec_t dbg_ring[DBG_RING_N];
+  static int dbg_ring_pos = 0;
+  do {
+    /* Advance the guest clock once per chunk, by however much real time has
+       actually passed, rather than once per batch with every chunk after the
+       first told that zero time elapsed.
+
+       The guest's clock is what rdtime reads, and RISC-V Linux implements
+       udelay by spinning on rdtime. With the clock frozen for a whole chunk,
+       any such delay ran to the end of that chunk no matter how short it
+       asked for. This costs no extra syscalls - the tick read that the loop
+       condition below already performs is reused as this iteration's
+       timestamp. */
+    uint32_t step_us = (uint32_t)((now - *last_tick) / TICKS_PER_US);
+    *last_tick = now;
+    ret = MiniRV32IMAStep(core, ram_image, 0, step_us, EMU_STEP_CHUNK);
+    dbg_step++;
+    bool changed = core->pc != dbg_last_pc || core->mcause != dbg_last_mc;
+    if (changed) {
+      dbg_ring[dbg_ring_pos].step = dbg_step;
+      dbg_ring[dbg_ring_pos].pc = core->pc;
+      dbg_ring[dbg_ring_pos].mc = core->mcause;
+      dbg_ring[dbg_ring_pos].ep = core->mepc;
+      dbg_ring[dbg_ring_pos].tv = core->mtval;
+      dbg_ring[dbg_ring_pos].ra = core->regs[1];
+      dbg_ring[dbg_ring_pos].sp = core->regs[2];
+      dbg_ring[dbg_ring_pos].gp = core->regs[3];
+      dbg_ring[dbg_ring_pos].tp = core->regs[4];
+      dbg_ring[dbg_ring_pos].a0 = core->regs[10];
+      dbg_ring[dbg_ring_pos].t4 = core->regs[29];
+      dbg_ring[dbg_ring_pos].mstatus = core->mstatus;
+      dbg_ring_pos = (dbg_ring_pos + 1) % DBG_RING_N;
+      dbg_stuck_count = 0;
+      dbg_dumped = false; // Forward progress resumed: re-arm for the next stall.
+    } else {
+      dbg_stuck_count++;
+    }
+    if (dbg_step <= 5 || dbg_step == 10 || dbg_step % 500 == 0 || changed) {
+      /* Deliberately NOT printed to the terminal: this shares the top
+         screen with the guest kernel's own console output, and spamming
+         it here was scrolling away real kernel boot/panic text before
+         it could ever be seen. File-only (dbg_log_file below). */
+      dbg_last_pc = core->pc;
+      dbg_last_mc = core->mcause;
+    }
+    /* Once the same (pc,mcause) has been the outcome of ~200 consecutive
+       chunk calls with zero forward progress, we're permanently stuck:
+       dump the ring buffer of the last DBG_RING_N distinct transitions
+       (i.e. the run-up to the freeze) plus a full register snapshot. */
+    if (!dbg_dumped && dbg_stuck_count == 200 && dbg_log_file) {
+      dbg_dumped = true;
+      fprintf(dbg_log_file, "=== STUCK at step %lu, dumping last %d transitions ===\n",
+        (unsigned long)dbg_step, DBG_RING_N);
+      for (int i = 0; i < DBG_RING_N; i++) {
+        dbg_rec_t *r = &dbg_ring[(dbg_ring_pos + i) % DBG_RING_N];
+        if (r->step == 0) continue;
+        fprintf(dbg_log_file, "[%lu] pc=%08lx mc=%lx ep=%08lx tv=%08lx ra=%08lx sp=%08lx gp=%08lx tp=%08lx a0=%08lx t4=%08lx mstatus=%08lx\n",
+          (unsigned long)r->step, (unsigned long)r->pc, (unsigned long)r->mc,
+          (unsigned long)r->ep, (unsigned long)r->tv, (unsigned long)r->ra,
+          (unsigned long)r->sp, (unsigned long)r->gp, (unsigned long)r->tp,
+          (unsigned long)r->a0, (unsigned long)r->t4, (unsigned long)r->mstatus);
+      }
+      fprintf(dbg_log_file, "=== FULL REGDUMP at step %lu ===\n", (unsigned long)dbg_step);
+      for (int ri = 0; ri < 32; ri++) {
+        fprintf(dbg_log_file, "x%-2d=%08lx%s", ri, (unsigned long)core->regs[ri], (ri % 4 == 3) ? "\n" : "  ");
+      }
+      fprintf(dbg_log_file, "\npc=%08lx mepc=%08lx mtval=%08lx mcause=%08lx mscratch=%08lx mtvec=%08lx mstatus=%08lx mie=%08lx mip=%08lx\n",
+        (unsigned long)core->pc, (unsigned long)core->mepc, (unsigned long)core->mtval,
+        (unsigned long)core->mcause, (unsigned long)core->mscratch, (unsigned long)core->mtvec,
+        (unsigned long)core->mstatus, (unsigned long)core->mie, (unsigned long)core->mip);
+      fprintf(dbg_log_file, "satp=%08lx sepc=%08lx stval=%08lx scause=%08lx stvec=%08lx sscratch=%08lx priv=%lu\n",
+        (unsigned long)core->satp, (unsigned long)core->sepc, (unsigned long)core->stval,
+        (unsigned long)core->scause, (unsigned long)core->stvec, (unsigned long)core->sscratch,
+        (unsigned long)(core->extraflags & 3));
+      fprintf(dbg_log_file, "=== END ===\n");
+      fflush(dbg_log_file);
+    }
+    now = svcGetSystemTick();
+  } while (ret != 1 &&
+           ret != 0x5555 &&
+           ret != 3 &&
+           !sbi_shutdown_requested &&
+           now - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
+
+  vnet_poll(ram_image);
+
+  int32_t axes[VI_NAXES];
+  LightLock_Lock(&ui_lock);
+  memcpy(axes, g_vinput_axes, sizeof(axes));
+  LightLock_Unlock(&ui_lock);
+  vinput_poll(ram_image, axes);
+
+  return ret;
+}
+
+static void EmuThreadEntry(void *arg) {
+  (void)arg;
+  uint64_t last_tick = svcGetSystemTick();
+  while (!g_emu_should_stop) {
+    int ret = EmuStepBatch(&last_tick);
+    g_emu_ret = ret;
+    if (ret == 0x5555 || ret == 3 || sbi_shutdown_requested) break;
+    if (ret == 1) svcSleepThread(1000000LL);
+  }
+}
 
 // This core boots straight into S-mode with no real M-mode firmware ever
 // running (see vendor/mini-rv32ima-mmu's file header for why), so this
@@ -640,6 +865,9 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno) { return 0; }
 
 
 int main(int argc, char **argv) {
+  LightLock_Init(&ui_lock);
+  LightLock_Init(&hid_ipc_lock);
+
   gfxInitDefault();
   osSetSpeedupEnable(true);
   gfxSetDoubleBuffering(GFX_BOTTOM, false);
@@ -793,6 +1021,13 @@ int main(int argc, char **argv) {
        mstatus.MIE and mie.MTIE stay permanently set so the real machine
        timer interrupt can fire at all and get forwarded to the guest as
        an STIP supervisor timer interrupt (see HandleException). */
+    /* The core struct lives inside the (zeroed) RAM image, and an all-zero
+       fetch cache would read as "VPN 0 is valid, at offset 0, for privilege 0
+       with generation 0". Nothing the guest actually does could reach that
+       state before the first satp write invalidates it, but relying on that
+       is a poor trade against one store: mark it invalid outright. */
+    core->fetch_tag = 0xffffffffu;
+
     core->extraflags |= 1; // S-mode
     core->medeleg = (1u<<0)|(1u<<2)|(1u<<3)|(1u<<4)|(1u<<5)|(1u<<6)|(1u<<7)|(1u<<8)|(1u<<12)|(1u<<13)|(1u<<15);
     core->mideleg = (1u<<1)|(1u<<5)|(1u<<9); // SSI, STI, SEI
@@ -812,16 +1047,68 @@ int main(int argc, char **argv) {
   term_state.dirty = true;
   PresentTopScreen(&last_present_tick);
 
-  bool touch_held = false;
-  uint64_t last_tick = svcGetSystemTick();
+  // Give the emulator its own physical core so it can run flat-out
+  // concurrently with input/rendering instead of time-slicing a single
+  // core with them. Prefer New3DS's extra core (id 2) - it's a dedicated
+  // spare application core, unlike core 1 (the system core, shared with
+  // Home Menu and other background OS tasks). Both are opportunistic:
+  // core 2 needs exheader kernel-flag permissions that belong to whatever
+  // hosts this .3dsx (the Homebrew Launcher, when run that way - not
+  // something this app's own build controls), and core 1 needs
+  // APT_SetAppCpuTimeLimit to succeed. Try core 2 first, fall back to
+  // core 1, and if neither works, fall back further to just not creating
+  // the thread at all - see below.
+#define EMU_THREAD_STACK_SIZE (32 * 1024)
+  s32 main_thread_prio = 0x30;
+  svcGetThreadPriority(&main_thread_prio, CUR_THREAD_HANDLE);
+  Thread emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 2, false);
+  const char *emu_core_desc = "New3DS core 2";
+  if (!emu_thread) {
+    if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))) {
+      emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 1, false);
+      emu_core_desc = "system core";
+    }
+  }
+  if (emu_thread) {
+    term_printf("Emulator thread: %s\n", emu_core_desc);
+  } else {
+    // Extremely unlikely (APT_SetAppCpuTimeLimit is a basic, always-
+    // available call) - if it still happens, there's no thread to run the
+    // emulator on at all. Say so and let the user read it and quit
+    // themselves rather than silently doing nothing then vanishing.
+    term_printf("Could not start emulator thread (core 1 or 2 both unavailable).\n");
+    term_state.dirty = true;
+    PresentTopScreen(&last_present_tick);
+    while (aptMainLoop()) {
+      hidScanInput();
+      if (hidKeysDown() & KEY_START) break;
+      svcSleepThread(1000000000LL / 30); // ns - see the main input loop below.
+    }
+  }
+  term_state.dirty = true;
+  PresentTopScreen(&last_present_tick);
 
-  while (aptMainLoop()) {
-    int ret = 0;
+  bool touch_held = false;
+
+  while (emu_thread && aptMainLoop()) {
 
     hidScanInput();
     u32 kDown = hidKeysDown();
     u32 kHeld = hidKeysHeld();
     if (kDown & KEY_START) break;
+
+    // Sample motion/slider hardware for the virtio-input device and hand
+    // it off to the emu thread. Sampling itself must stay on this thread -
+    // see vinput_sample_hw()'s comment in virtio_input.h - piggybacking on
+    // the hidScanInput() just above costs a handful of comparisons per
+    // frame and naturally rate-limits to the console's own refresh.
+    {
+      int32_t axes[VI_NAXES];
+      vinput_sample_hw(axes);
+      LightLock_Lock(&ui_lock);
+      memcpy(g_vinput_axes, axes, sizeof(axes));
+      LightLock_Unlock(&ui_lock);
+    }
 
     // Zoom controls (L/Y = zoom out, R/X = zoom in, always both axes equally)
     if (kDown & KEY_L || kDown & KEY_Y) {
@@ -950,120 +1237,53 @@ int main(int argc, char **argv) {
       }
     }
 
-    // Emulator steps
-    //
-    // dbg_log_file below writes a ring buffer of the last DBG_RING_N
-    // distinct (pc,mcause) transitions plus a full register dump to
-    // sdmc:/3ds-cli-debug.log whenever execution is detected as stuck
-    // (200 consecutive chunks with zero forward progress), re-arming once
-    // forward progress resumes. Cheap enough to leave enabled, and it has
-    // paid for itself repeatedly when a guest-side hang needed diagnosing.
-    uint64_t cur = svcGetSystemTick();
-    uint32_t us = (cur - last_tick) / TICKS_PER_US;
-    last_tick = cur;
-    uint64_t frame_start = cur;
-    uint32_t elapsed_us = us;
-    static uint32_t dbg_step = 0;
-    static uint32_t dbg_last_pc = 0xffffffffu, dbg_last_mc = 0xffffffffu;
-    static uint32_t dbg_stuck_count = 0;
-    static bool dbg_dumped = false;
-#define DBG_RING_N 512
-    typedef struct { uint32_t step, pc, mc, ep, tv, ra, sp, tp, t4, gp, a0, mstatus; } dbg_rec_t;
-    static dbg_rec_t dbg_ring[DBG_RING_N];
-    static int dbg_ring_pos = 0;
-    do {
-      ret = MiniRV32IMAStep(core, ram_image, 0, elapsed_us, EMU_STEP_CHUNK);
-      elapsed_us = 0;
-      dbg_step++;
-      bool changed = core->pc != dbg_last_pc || core->mcause != dbg_last_mc;
-      if (changed) {
-        dbg_ring[dbg_ring_pos].step = dbg_step;
-        dbg_ring[dbg_ring_pos].pc = core->pc;
-        dbg_ring[dbg_ring_pos].mc = core->mcause;
-        dbg_ring[dbg_ring_pos].ep = core->mepc;
-        dbg_ring[dbg_ring_pos].tv = core->mtval;
-        dbg_ring[dbg_ring_pos].ra = core->regs[1];
-        dbg_ring[dbg_ring_pos].sp = core->regs[2];
-        dbg_ring[dbg_ring_pos].gp = core->regs[3];
-        dbg_ring[dbg_ring_pos].tp = core->regs[4];
-        dbg_ring[dbg_ring_pos].a0 = core->regs[10];
-        dbg_ring[dbg_ring_pos].t4 = core->regs[29];
-        dbg_ring[dbg_ring_pos].mstatus = core->mstatus;
-        dbg_ring_pos = (dbg_ring_pos + 1) % DBG_RING_N;
-        dbg_stuck_count = 0;
-        dbg_dumped = false; // Forward progress resumed: re-arm for the next stall.
-      } else {
-        dbg_stuck_count++;
-      }
-      if (dbg_step <= 5 || dbg_step == 10 || dbg_step % 500 == 0 || changed) {
-        /* Deliberately NOT printed to the terminal: this shares the top
-           screen with the guest kernel's own console output, and spamming
-           it here was scrolling away real kernel boot/panic text before
-           it could ever be seen. File-only (dbg_log_file below). */
-        dbg_last_pc = core->pc;
-        dbg_last_mc = core->mcause;
-      }
-      /* Once the same (pc,mcause) has been the outcome of ~200 consecutive
-         chunk calls with zero forward progress, we're permanently stuck:
-         dump the ring buffer of the last DBG_RING_N distinct transitions
-         (i.e. the run-up to the freeze) plus a full register snapshot. */
-      if (!dbg_dumped && dbg_stuck_count == 200 && dbg_log_file) {
-        dbg_dumped = true;
-        fprintf(dbg_log_file, "=== STUCK at step %lu, dumping last %d transitions ===\n",
-          (unsigned long)dbg_step, DBG_RING_N);
-        for (int i = 0; i < DBG_RING_N; i++) {
-          dbg_rec_t *r = &dbg_ring[(dbg_ring_pos + i) % DBG_RING_N];
-          if (r->step == 0) continue;
-          fprintf(dbg_log_file, "[%lu] pc=%08lx mc=%lx ep=%08lx tv=%08lx ra=%08lx sp=%08lx gp=%08lx tp=%08lx a0=%08lx t4=%08lx mstatus=%08lx\n",
-            (unsigned long)r->step, (unsigned long)r->pc, (unsigned long)r->mc,
-            (unsigned long)r->ep, (unsigned long)r->tv, (unsigned long)r->ra,
-            (unsigned long)r->sp, (unsigned long)r->gp, (unsigned long)r->tp,
-            (unsigned long)r->a0, (unsigned long)r->t4, (unsigned long)r->mstatus);
-        }
-        fprintf(dbg_log_file, "=== FULL REGDUMP at step %lu ===\n", (unsigned long)dbg_step);
-        for (int ri = 0; ri < 32; ri++) {
-          fprintf(dbg_log_file, "x%-2d=%08lx%s", ri, (unsigned long)core->regs[ri], (ri % 4 == 3) ? "\n" : "  ");
-        }
-        fprintf(dbg_log_file, "\npc=%08lx mepc=%08lx mtval=%08lx mcause=%08lx mscratch=%08lx mtvec=%08lx mstatus=%08lx mie=%08lx mip=%08lx\n",
-          (unsigned long)core->pc, (unsigned long)core->mepc, (unsigned long)core->mtval,
-          (unsigned long)core->mcause, (unsigned long)core->mscratch, (unsigned long)core->mtvec,
-          (unsigned long)core->mstatus, (unsigned long)core->mie, (unsigned long)core->mip);
-        fprintf(dbg_log_file, "satp=%08lx sepc=%08lx stval=%08lx scause=%08lx stvec=%08lx sscratch=%08lx priv=%lu\n",
-          (unsigned long)core->satp, (unsigned long)core->sepc, (unsigned long)core->stval,
-          (unsigned long)core->scause, (unsigned long)core->stvec, (unsigned long)core->sscratch,
-          (unsigned long)(core->extraflags & 3));
-        fprintf(dbg_log_file, "=== END ===\n");
-        fflush(dbg_log_file);
-      }
-    } while (ret != 1 &&
-             ret != 0x5555 &&
-             ret != 3 &&
-             !sbi_shutdown_requested &&
-             svcGetSystemTick() - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
-
-    vnet_poll(ram_image);
-    /* Sensor sampling piggybacks on the hidScanInput() already done at the
-       top of this loop, so it costs a handful of comparisons per frame and
-       naturally runs at the console's own refresh rate. */
-    vinput_poll(ram_image);
-
-    if (ret == 0x5555 || ret == 3 || sbi_shutdown_requested) {
-      if (ret == 3) term_printf("Emulator fault!\n");
+    // Emulation itself now runs continuously on its own thread (see
+    // EmuThreadEntry/EmuStepBatch above and the threadCreate call earlier
+    // in this function) instead of being stepped from here in batches.
+    // This thread's only remaining jobs are input, rendering, and noticing
+    // when the emu thread reports the guest shut down or faulted.
+    int emu_ret = g_emu_ret;
+    if (emu_ret == 0x5555 || emu_ret == 3 || sbi_shutdown_requested) {
+      if (emu_ret == 3) term_printf("Emulator fault!\n");
       term_state.dirty = true;
       PresentTopScreen(&last_present_tick);
       break;
     }
 
-    if (ret == 1 || TimeSinceUs(last_present_tick, TOP_REFRESH_INTERVAL_US)) {
+    if (TimeSinceUs(last_present_tick, TOP_REFRESH_INTERVAL_US)) {
       if (term_state.dirty) {
         PresentTopScreen(&last_present_tick);
       }
     }
 
-    if (ret == 1) {
-      svcSleepThread(1000000LL);
-    }
+    // Nothing CPU-heavy left to do on this thread each iteration now that
+    // emulation runs elsewhere - yield briefly instead of spinning flat
+    // out just to poll input/vblank state. ~60Hz is plenty for a touch UI.
+    //
+    // svcSleepThread takes NANOseconds. This was 1000000LL/60, i.e. 16.7us,
+    // which polled input roughly a thousand times more often than the 60Hz
+    // intended just above - a whole core spinning on hidScanInput(). On a
+    // New3DS that core is otherwise idle so it merely wastes power, but on an
+    // Old 3DS this thread shares the system core with the emulator and every
+    // one of those wakeups came straight out of guest execution time.
+    svcSleepThread(1000000000LL / 60);
   }
+
+  // Stop and join the emu thread before touching anything it owns
+  // (ram_image, disk_file, the virtio device FILE*s, etc.) - this is the
+  // one synchronization point that matters most: without it, the frees
+  // and fcloses below could run concurrently with the emu thread still
+  // using those same pointers/handles.
+  if (emu_thread) {
+    g_emu_should_stop = true;
+    threadJoin(emu_thread, U64_MAX);
+    threadFree(emu_thread);
+  }
+
+  /* Explicit, now that the console mirror is no longer flushed on every
+     line - this is what makes a clean exit lose none of it. */
+  if (uart_log_file) { fclose(uart_log_file); uart_log_file = NULL; }
+  if (dbg_log_file)  { fclose(dbg_log_file);  dbg_log_file = NULL; }
 
   if (disk_file) fclose(disk_file);
   CloseSwapFile();

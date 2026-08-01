@@ -167,7 +167,10 @@ static int hw_rd_slider_3d(char *b, int n) {
 
 static int hw_rd_slider_volume(char *b, int n) {
     u8 vol = 0;
-    if (R_SUCCEEDED(HIDUSER_GetSoundVolume(&vol)))
+    LightLock_Lock(&hid_ipc_lock);
+    Result r = HIDUSER_GetSoundVolume(&vol);
+    LightLock_Unlock(&hid_ipc_lock);
+    if (R_SUCCEEDED(r))
         return snprintf(b, n, "%u\n", vol);
     if (hw.mcu && R_SUCCEEDED(MCUHWC_GetSoundSliderLevel(&vol)))
         return snprintf(b, n, "%u\n", vol);

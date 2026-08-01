@@ -200,32 +200,46 @@ static bool vinput_push(uint8_t *ram, uint16_t type, uint16_t code, int32_t valu
     return true;
 }
 
-/* Samples all axes and emits events for the ones that moved, followed by a
-   SYN_REPORT if anything did. Called from the main loop. */
-static void vinput_poll(uint8_t *ram) {
-    if (!vin.q[0].ready) return;
+/* Reads the actual hardware: accel/gyro come straight out of HID shared
+   memory, so reading them every frame is free. The volume slider needs an
+   actual IPC round trip to the HID service, and it's a physical slider
+   nobody moves 60 times a second, so it's sampled far more rarely.
 
+   Split out from vinput_poll() (below) because it must run on whichever
+   thread has been driving hidScanInput() each frame: hidAccelRead/
+   hidGyroRead return whatever hidScanInput() last cached, so calling them
+   fresh from a second thread that never calls hidScanInput() itself isn't
+   something to gamble on. The caller (main.c's main-thread loop) is
+   responsible for getting the result to vinput_poll() - which may now be
+   running on a different thread - via a locked handoff; see g_vinput_axes
+   in main.c. */
+static void vinput_sample_hw(int32_t out[VI_NAXES]) {
     accelVector av = {0, 0, 0};
     angularRate gr = {0, 0, 0};
     if (hw.sensors) { hidAccelRead(&av); hidGyroRead(&gr); }
 
-    /* accel/gyro come straight out of HID shared memory, so reading them
-       every frame is free. The volume slider needs an actual IPC round trip
-       to the HID service, and it's a physical slider nobody moves 60 times
-       a second, so it's sampled far more rarely. */
     static int slider_div = 0;
     static u8  vol = 0;
     if (slider_div-- <= 0) {
         slider_div = 30;
-        if (R_FAILED(HIDUSER_GetSoundVolume(&vol))) vol = 0;
+        LightLock_Lock(&hid_ipc_lock);
+        Result r = HIDUSER_GetSoundVolume(&vol);
+        LightLock_Unlock(&hid_ipc_lock);
+        if (R_FAILED(r)) vol = 0;
     }
 
-    int32_t cur[VI_NAXES] = {
-        av.x, av.y, av.z,
-        gr.x, gr.y, gr.z,
-        (int32_t)(osGet3DSliderState() * 100.0f + 0.5f),
-        (int32_t)vol,
-    };
+    out[0] = av.x; out[1] = av.y; out[2] = av.z;
+    out[3] = gr.x; out[4] = gr.y; out[5] = gr.z;
+    out[6] = (int32_t)(osGet3DSliderState() * 100.0f + 0.5f);
+    out[7] = (int32_t)vol;
+}
+
+/* Emits events for axes that moved since the last poll, followed by a
+   SYN_REPORT if anything did. `cur` is a hardware sample already obtained
+   via vinput_sample_hw() - see that function's comment for why sampling
+   and injection are split like this. */
+static void vinput_poll(uint8_t *ram, const int32_t cur[VI_NAXES]) {
+    if (!vin.q[0].ready) return;
 
     bool any = false;
     for (int i = 0; i < VI_NAXES; i++) {

@@ -36,9 +36,13 @@ APP_TITLE		:=	3DS-CLI
 APP_DESCRIPTION	:=	Linux Environment for 3DS
 APP_AUTHOR		:=	cmdada
 BUILD		:=	build
-SOURCES		:=	source
+# The touch keyboard is built from source alongside the app rather than
+# linked as a prebuilt .a, so there's still exactly one `make` to run and the
+# submodule needs no separate build step.
+SOURCES		:=	source vendor/ctr-osk-rt/source
 DATA		:=	data
-INCLUDES	:=	include vendor/mini-rv32ima-mmu
+INCLUDES	:=	include vendor/mini-rv32ima-mmu \
+			vendor/ctr-osk-rt/include vendor/ctr-osk-rt/source
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 #ROMFS		:=	romfs

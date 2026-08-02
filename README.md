@@ -108,7 +108,12 @@ different releases. Update both.
 
 ## Building
 
-Needs devkitPro with devkitARM and libctru.
+Needs devkitPro with devkitARM and libctru. The emulator core and the touch
+keyboard are submodules, so clone with them:
+
+```sh
+git clone --recursive https://github.com/cmdada/3DS-CLI
+```
 
 ```sh
 make        # 3ds-cli.3dsx
@@ -136,6 +141,8 @@ and a separate `rootfs.ext2` on the SD card, which is easier while iterating.
 - Built with [devkitARM / libctru](https://github.com/devkitPro/libctru)
 - Powered by [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), a
   fork of [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) by cnlohr
+- Bottom-screen keyboard is [ctr-osk-rt](https://github.com/cmdada/ctr-osk-rt),
+  which started life in this repo and is now usable in any 3DS homebrew
 
 ## License
 

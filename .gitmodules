@@ -1,3 +1,6 @@
 [submodule "vendor/mini-rv32ima-mmu"]
 	path = vendor/mini-rv32ima-mmu
 	url = https://github.com/cmdada/mini-rv32ima-mmu.git
+[submodule "vendor/ctr-osk-rt"]
+	path = vendor/ctr-osk-rt
+	url = https://github.com/cmdada/ctr-osk-rt.git

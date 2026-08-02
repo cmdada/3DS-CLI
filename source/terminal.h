@@ -5,8 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include "glcdfont.h"
-#include "draw.h" // for font8x8
+#include "font.h" // font8x8 and font5x7
 
 #define TERM_COLS 80
 #define TERM_ROWS 30

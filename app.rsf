@@ -19,11 +19,22 @@ AccessControlInfo:
   IdealProcessor                : 0
   AffinityMask                  : 1
   Priority                      : 16
-  MaxCpu                        : 0x9E
+  # Resource limit descriptor 0: bit 7 selects mode-1 (preemptive) core 1
+  # scheduling, the low 7 bits are the ceiling PM will accept from
+  # APT_SetAppCpuTimeLimit. main() asks for 80% before putting the emulator
+  # thread on core 1, so anything below that fails the call outright with
+  # 0xD8E05BF4 and leaves nothing to run the emulator on (issue #6 - the
+  # stock template value of 0x9E means a 30% ceiling). 0xD9 is what Luma's
+  # hbldr hands a .3dsx, which is why that build was unaffected.
+  MaxCpu                        : 0xD9
   CoreVersion                   : 2
   HandleTableSize               : 0x200
   SystemMode                    : 64MB
-  SystemModeExt                 : Legacy
+  # New3DS only, both of them, and both matching what hbldr gives the .3dsx:
+  # core 2 is where the emulator thread goes on that model (see main()), and
+  # Legacy would otherwise cap a New3DS at the Old3DS memory region.
+  CanAccessCore2                : true
+  SystemModeExt                 : 124MB
   ResourceLimitCategory         : Application
   MemoryType                    : Application
   SystemCallAccess:

@@ -1,4 +1,4 @@
-# 3DS-CLI [![Release](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml/badge.svg)](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml)
+# 3DS-CLI [![Release](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml/badge.svg)](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml) [![Downloads](https://img.shields.io/github/downloads/cmdada/3ds-cli/total.svg)](https://github.com/cmdada/3DS-CLI/releases)
 
 Run real RISC-V Linux on a Nintendo 3DS.
 

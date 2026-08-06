@@ -45,6 +45,8 @@ INCLUDES	:=	include vendor/mini-rv32ima-mmu \
 			vendor/ctr-osk-rt/include vendor/ctr-osk-rt/source
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
+
+ICON		:=	icon.png
 #ROMFS		:=	romfs
 #GFXBUILD	:=	$(ROMFS)/gfx
 
@@ -181,9 +183,9 @@ export BANNERTOOL  ?= bannertool
 export MAKEROM     ?= makerom
 
 export BANNER_IMAGE := $(TOPDIR)/banner.png
-export BANNER_AUDIO := $(TOPDIR)/silence.wav
-export BANNER       := $(TOPDIR)/banner.bnr
-export APP_RSF      := $(TOPDIR)/app.rsf
+export BANNER_AUDIO := $(TOPDIR)/assets/silence.wav
+export BANNER       := $(TOPDIR)/$(BUILD)/banner.bnr
+export APP_RSF      := $(TOPDIR)/assets/app.rsf
 
 .PHONY: all clean cia dtb check
 

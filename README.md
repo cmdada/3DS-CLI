@@ -6,7 +6,7 @@ Run real RISC-V Linux on a Nintendo 3DS.
 card, using [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), mini-rv32ima with a full Sv32 MMU, S-mode and a built-in SBI,
 running as ordinary homebrew inside Horizon OS.
 
-![3DS-CLI running on a Nintendo 3DS](example.jpg)
+![3DS-CLI running on a Nintendo 3DS](assets/example.jpg)
 
 - Top screen is a terminal (ANSI/xterm, 24-bit colour, zoom, panning). Bottom
   screen is a touch keyboard.

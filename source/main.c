@@ -8,8 +8,15 @@
 #include <unistd.h>   /* ftruncate, for preallocating the extracted rootfs */
 #include "terminal.h"
 #include <ctrosk.h>
+#include "theme.h"    /* the adabit palette, shared by the terminal and the UI */
+#include "config.h"   /* sdmc:/3ds-cli.cfg                                     */
+#include "ui3ds.h"    /* bottom-screen drawing primitives                      */
 
 TermState term_state;
+
+/* Live settings. The device flags in here are deliberately NOT what the
+   emulator reads - see the g_dev_* snapshot below. */
+static Cfg g_cfg;
 
 u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
 
@@ -139,7 +146,9 @@ static FILE *uart_log_file = NULL; // sdmc:/3ds-cli-console.log mirror of guest 
 static void WriteUARTByte(char c) {
   uart_byte_count++;
   LightLock_Lock(&ui_lock);
-  term_state.auto_track = true;
+  /* Gated, or scrollback is unreadable while the guest is printing: every
+     byte would snap the viewport back. "Follow output", also bound to ZL. */
+  if (g_cfg.follow_output) term_state.auto_track = true;
   term_write_char(&term_state, c);
   LightLock_Unlock(&ui_lock);
   // File I/O below is safe unlocked: uart_log_file is only ever touched
@@ -393,6 +402,18 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 #include "virtio_input.h"
 #include "rtc_goldfish.h"
 
+/* Which devices this launch brought up, snapshotted from g_cfg in main()
+   before the emulation thread starts. The MMIO decode below reads these and
+   never g_cfg, which the settings page writes from the other thread - so a
+   device cannot stop answering after its driver has bound to it, which would
+   hang the guest. */
+static bool g_dev_net = true, g_dev_rng = true, g_dev_9p = true, g_dev_input = true;
+
+/* Included here rather than up with terminal.h: both reach into term_state,
+   ui_lock, g_osk, rx_push_str and the virtio devices above. */
+#include "settings.h"
+#include "inputpane.h"
+
 // Written by the emu thread (HandleSBICall, on an SRST call), read by the
 // main thread's exit check below - volatile so the main thread's compiled
 // loop actually re-reads it each iteration instead of possibly hoisting a
@@ -459,6 +480,12 @@ static int EmuStepBatch(uint64_t *last_tick) {
        asked for. This costs no extra syscalls - the tick read that the loop
        condition below already performs is reused as this iteration's
        timestamp. */
+    /* Horizon suspends this process while the system keyboard applet is up,
+       so on the way out the tick delta below is the whole typing session
+       rather than a chunk. Handing the guest that in one step means a backlog
+       of timer interrupts and an RCU stall splat; swallow the gap instead. */
+    if (g_emu_rebase_clock) { g_emu_rebase_clock = false; *last_tick = now; }
+
     uint32_t step_us = (uint32_t)((now - *last_tick) / TICKS_PER_US);
     *last_tick = now;
     ret = MiniRV32IMAStep(core, ram_image, 0, step_us, EMU_STEP_CHUNK);
@@ -643,13 +670,16 @@ static uint32_t HandleControlStore(uint32_t addy, uint32_t val) {
   else if (addy == 0x11100000) { core->pc += 4; return val; }
   else if ((bd = vblk_for_addr(addy)) != NULL)
     vblk_store(bd, addy, val, ram_image);
-  else if (addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
+  /* A device turned off is simply not decoded: the range falls through to the
+     final return, so a read of its VREG_MAGIC gives 0 instead of "virt" and
+     Linux's virtio-mmio driver skips the node. */
+  else if (g_dev_net && addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
     vnet_store(addy, val, ram_image);
-  else if (addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
+  else if (g_dev_rng && addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
     vrng_store(addy, val, ram_image);
-  else if (addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
+  else if (g_dev_9p && addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
     v9p_store(addy, val, ram_image);
-  else if (addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
+  else if (g_dev_input && addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
     vinput_store(addy, val, ram_image);
   else if (addy >= RTC_GOLDFISH_BASE && addy < RTC_GOLDFISH_BASE + RTC_GOLDFISH_SIZE)
     rtc_goldfish_store(addy, val);
@@ -665,13 +695,13 @@ static uint32_t HandleControlLoad(uint32_t addy) {
   else if (addy == 0x1100bff8) return core->timerl;
   else if ((bd = vblk_for_addr(addy)) != NULL)
     return vblk_load(bd, addy);
-  else if (addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
+  else if (g_dev_net && addy >= VIRTIO_NET_BASE && addy < VIRTIO_NET_BASE + VIRTIO_NET_SIZE)
     return vnet_load(addy);
-  else if (addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
+  else if (g_dev_rng && addy >= VIRTIO_RNG_BASE && addy < VIRTIO_RNG_BASE + VIRTIO_RNG_SIZE)
     return vrng_load(addy);
-  else if (addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
+  else if (g_dev_9p && addy >= VIRTIO_9P_BASE && addy < VIRTIO_9P_BASE + VIRTIO_9P_SIZE)
     return v9p_load(addy);
-  else if (addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
+  else if (g_dev_input && addy >= VIRTIO_INPUT_BASE && addy < VIRTIO_INPUT_BASE + VIRTIO_INPUT_SIZE)
     return vinput_load(addy);
   else if (addy >= RTC_GOLDFISH_BASE && addy < RTC_GOLDFISH_BASE + RTC_GOLDFISH_SIZE)
     return rtc_goldfish_load(addy);
@@ -701,13 +731,34 @@ int main(int argc, char **argv) {
 
   term_init(&term_state);
 
+  /* Before anything renders: the theme has to be in place for the first
+     frame, or the boot log paints in the old colours and restyles itself a
+     moment later. */
+  cfg_load(&g_cfg);
+
+  /* Snapshot the device flags before the emulation thread exists. The 9P tree
+     toggles are finer-grained than the device - one virtio-9p channel carries
+     all four trees - so they gate the trees inside v9p_init, and only turning
+     off every tree removes the device. */
+  g_dev_net   = g_cfg.dev_net;
+  g_dev_rng   = g_cfg.dev_rng;
+  g_dev_input = g_cfg.dev_sensors;
+  g_dev_9p    = g_cfg.dev_sd || g_cfg.dev_nand || g_cfg.dev_twl;
+
   // Bottom screen: the keyboard owns it outright, drawing into the raw
   // framebuffer (no consoleInit). ctrOskInit is also what turns off double
   // buffering down there, since it redraws in place and never swaps.
   ctrOskInit(&g_osk);
   g_osk.title    = "3ds-cli";
   g_osk.subtitle = "adabit.org";
-  ctrOskDraw(&g_osk);
+
+  /* Pushes the loaded theme into the terminal palette and the keyboard, and
+     applies font/zoom/cursor/follow. Safe this early: the emulation thread
+     does not exist yet. */
+  settings_apply_live();
+
+  if (g_cfg.keyboard == 0) ctrOskDraw(&g_osk);
+  else                     pane_draw();
 
   term_printf("\x1b[2J");
   term_printf("Welcome to 3DS-CLI Linux Emulator\n");
@@ -715,6 +766,14 @@ int main(int argc, char **argv) {
   term_state.dirty = true;
   uint64_t last_present_tick = 0;
   PresentTopScreen(&last_present_tick);
+
+  /* A diagnostic, not an optimisation: it reproduces an Old3DS-sized heap on
+     a New3DS, for "Image too large for RAM" (issue #5). Capped or not, the
+     walk below still backs off until malloc succeeds. */
+  if (g_cfg.ram_cap_mb > 0) {
+    uint32_t cap = (uint32_t)g_cfg.ram_cap_mb * 1024 * 1024;
+    if (cap < ram_amt) ram_amt = cap;
+  }
 
   while (ram_amt >= 8 * 1024 * 1024) {
     ram_image = malloc(ram_amt);
@@ -750,6 +809,25 @@ int main(int argc, char **argv) {
   uint32_t rootfs_gz_len = 0, rootfs_raw_len = 0;
   long flen = ImageKernelLen(f, file_len, &rootfs_gz_len, &rootfs_raw_len);
   bool have_bundle = flen != file_len;
+  /* Gates the "Reset guest state from Image" row: with no embedded rootfs
+     there is nothing to re-extract from. */
+  g_have_bundle = have_bundle;
+
+  /* A reset asked for in a previous session lands here, before anything opens
+     the disk - the settings page cannot unlink rootfs.ext2 while the
+     emulation thread has it open. */
+  if (g_cfg.reset_rootfs) {
+    g_cfg.reset_rootfs = false;
+    cfg_save(&g_cfg);
+    if (have_bundle) {
+      remove("sdmc:/rootfs.ext2");
+      term_printf("Resetting guest state: rootfs will be re-extracted.\n");
+    } else {
+      /* The row is unreachable without a bundle, but a hand-edited config
+         file can still set the flag. */
+      term_printf("Reset requested, but Image has no rootfs - skipped.\n");
+    }
+  }
 
   /* Open rootfs disk image for virtio-blk, extracting it from the Image
      bundle first if it isn't on the SD card yet. */
@@ -772,34 +850,61 @@ int main(int argc, char **argv) {
   vblk_init(0, disk_file, disk_size, VIRTIO_BLK_BASE, PLIC_SRC_BLK);
   term_printf("Disk: %s (%lluMB)\n", disk_path, (unsigned long long)(disk_size >> 20));
 
+  /* Two distinct words in the banners below: "disabled" means the user turned
+     it off, "unavailable" means it was asked for and the hardware or the
+     permissions weren't there. */
+
   /* Swap is optional: if the file can't be created (full SD, read-only
      card), instance 1 keeps base == 0, nothing answers at 0x10005000, and
      the guest's init script falls back to zram. */
-  swap_file = CreateSwapFile(&last_present_tick);
-  if (swap_file) {
-    vblk_init(1, swap_file, SWAP_SIZE_BYTES, VIRTIO_BLK2_BASE, PLIC_SRC_SWAP);
-    term_printf("Swap: %luMB (%s)\n", (unsigned long)(SWAP_SIZE_BYTES >> 20), SWAP_PATH);
+  if (g_cfg.dev_swap) {
+    swap_file = CreateSwapFile(&last_present_tick);
+    if (swap_file) {
+      vblk_init(1, swap_file, SWAP_SIZE_BYTES, VIRTIO_BLK2_BASE, PLIC_SRC_SWAP);
+      term_printf("Swap: %luMB (%s)\n", (unsigned long)(SWAP_SIZE_BYTES >> 20), SWAP_PATH);
+    } else {
+      term_printf("Swap: unavailable (guest falls back to zram)\n");
+    }
   } else {
-    term_printf("Swap: unavailable (guest falls back to zram)\n");
+    term_printf("Swap: disabled (guest falls back to zram)\n");
   }
 
-  vrng_init();
-  term_printf("Hardware RNG: %s\n", vrng.ps_ready ? "ok" : "unavailable (fallback)");
+  if (g_dev_rng) {
+    vrng_init();
+    term_printf("Hardware RNG: %s\n", vrng.ps_ready ? "ok" : "unavailable (fallback)");
+  } else {
+    term_printf("Hardware RNG: disabled\n");
+  }
 
-  vnet_init();
-  term_printf("Network: %s\n", vnet.soc_ready ? "ok (NAT via 3DS WiFi)" : "unavailable");
+  if (g_dev_net) {
+    vnet_init();
+    term_printf("Network: %s\n", vnet.soc_ready ? "ok (NAT via 3DS WiFi)" : "unavailable");
+  } else {
+    term_printf("Network: disabled\n");
+  }
 
   /* Passthrough + sensors. The NAND trees need extended homebrew
      permissions; without them they're simply absent and the guest's
      mount of them fails rather than the whole device disappearing. */
-  v9p_init();
-  term_printf("Passthrough: sd hw%s%s\n",
-              v9p_tree_ok[V9P_TREE_NAND] ? " nand" : "",
-              v9p_tree_ok[V9P_TREE_TWL]  ? " twl"  : "");
+  if (g_dev_9p) {
+    v9p_init(g_cfg.dev_sd, g_cfg.dev_nand, g_cfg.dev_twl);
+    term_printf("Passthrough: hw%s%s%s\n",
+                v9p_tree_ok[V9P_TREE_SD]   ? " sd"   : "",
+                v9p_tree_ok[V9P_TREE_NAND] ? " nand" : "",
+                v9p_tree_ok[V9P_TREE_TWL]  ? " twl"  : "");
+  } else {
+    /* Every tree off takes the whole device with it, including the synthetic
+       hw/ tree - there is only one virtio-9p channel. */
+    term_printf("Passthrough: disabled\n");
+  }
 
-  vinput_init();
-  term_printf("Sensors: %s\n", hw.sensors ? "ok (accel, gyro, sliders)"
-                                          : "unavailable");
+  if (g_dev_input) {
+    vinput_init();
+    term_printf("Sensors: %s\n", hw.sensors ? "ok (accel, gyro, sliders)"
+                                            : "unavailable");
+  } else {
+    term_printf("Sensors: disabled\n");
+  }
 
   /* The RISC-V Linux Image header's image_load_offset field (8-byte LE at
      file offset 8) says how far into RAM the bootloader must place byte 0
@@ -967,12 +1072,18 @@ int main(int argc, char **argv) {
     u32 kDown = hidKeysDown();
     if (kDown & KEY_START) break;
 
+    touchPosition touch;
+    hidTouchRead(&touch);
+    bool tapped = (kDown & KEY_TOUCH) != 0;
+
     // Sample motion/slider hardware for the virtio-input device and hand
     // it off to the emu thread. Sampling itself must stay on this thread -
     // see vinput_sample_hw()'s comment in virtio_input.h - piggybacking on
     // the hidScanInput() just above costs a handful of comparisons per
     // frame and naturally rate-limits to the console's own refresh.
-    {
+    // Skipped when the sensor device is off: nothing would read the result,
+    // and hw3ds_init may never have run.
+    if (g_dev_input) {
       int32_t axes[VI_NAXES];
       vinput_sample_hw(axes);
       LightLock_Lock(&ui_lock);
@@ -980,26 +1091,63 @@ int main(int argc, char **argv) {
       LightLock_Unlock(&ui_lock);
     }
 
+    /* Above the settings block on purpose: this is the only thing that marks
+       the top screen dirty while the guest is silent, so below the goto the
+       cursor freezes mid-phase for as long as the page is open.
+
+       Skipped when blinking is off. Each edge costs a full software blit of
+       the grid into the framebuffer, twice a second forever, which on an Old
+       3DS comes out of guest execution time (see g_top_refresh_us). */
+    if (term_state.cursor_blink) {
+      static bool last_blink_on = false;
+      bool blink_on = (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
+      if (blink_on != last_blink_on) {
+        term_state.dirty = true;
+        last_blink_on = blink_on;
+      }
+    }
+
+    /* The settings page takes the whole bottom screen and every button but
+       START: ctrOskDraw clears all 320x240, so the page and the keyboard
+       cannot share the screen. */
+    if (settings_open) {
+      if (!settings_update(kDown, &touch, tapped)) settings_leave();
+      if (settings_quit) { settings_quit = false; break; }
+      if (settings_open) settings_draw();
+      goto after_input;
+    }
+
+    if (kDown & KEY_SELECT) {
+      settings_enter();
+      settings_draw();
+      goto after_input;
+    }
+
     // Zoom controls (L/Y = zoom out, R/X = zoom in, always both axes equally)
+    /* These shortcuts and their settings rows are the same controls, so each
+       writes g_cfg as well as term_state - otherwise the page opens showing
+       stale values and the next save undoes what the buttons did. */
     if (kDown & KEY_L || kDown & KEY_Y) {
       int z = (term_state.zoom_x > 1) ? term_state.zoom_x - 1 : 1;
-      term_state.zoom_x = z;
-      term_state.zoom_y = z;
+      term_state.zoom_x = g_cfg.zoom_x = z;
+      term_state.zoom_y = g_cfg.zoom_y = z;
       term_state.dirty = true;
     }
     if (kDown & KEY_R || kDown & KEY_X) {
       int z = (term_state.zoom_x < 5) ? term_state.zoom_x + 1 : 5;
-      term_state.zoom_x = z;
-      term_state.zoom_y = z;
+      term_state.zoom_x = g_cfg.zoom_x = z;
+      term_state.zoom_y = g_cfg.zoom_y = z;
       term_state.dirty = true;
     }
     if (kDown & KEY_ZL) {
-      term_state.auto_track = !term_state.auto_track;
+      g_cfg.follow_output = !g_cfg.follow_output;
+      term_state.auto_track = g_cfg.follow_output;
       if (term_state.auto_track) term_state.scroll_y = 0; // snap back to live
       term_state.dirty = true;
     }
     if (kDown & KEY_ZR) {
-      term_state.use_5x7 = !term_state.use_5x7;
+      g_cfg.use_5x7 = !g_cfg.use_5x7;
+      term_state.use_5x7 = g_cfg.use_5x7;
       term_state.dirty = true;
     }
 
@@ -1009,40 +1157,54 @@ int main(int argc, char **argv) {
     circlePosition cpos;
     hidCircleRead(&cpos);
 
-    if (abs(cpos.dx) > 40) {
-      term_state.auto_track = false;
-      if (pan_cooldown_x <= 0) {
-        if (cpos.dx > 40) term_state.scroll_x++;
-        else if (cpos.dx < -40) term_state.scroll_x--;
-        pan_cooldown_x = 4;
-        term_state.dirty = true;
+    if (g_cfg.circle_pans) {
+      if (abs(cpos.dx) > 40) {
+        /* Turns follow-output off, not just auto_track: WriteUARTByte sets
+           auto_track back on at the very next byte from the guest. */
+        g_cfg.follow_output = false;
+        term_state.auto_track = false;
+        if (pan_cooldown_x <= 0) {
+          if (cpos.dx > 40) term_state.scroll_x++;
+          else if (cpos.dx < -40) term_state.scroll_x--;
+          pan_cooldown_x = 4;
+          term_state.dirty = true;
+        } else {
+          pan_cooldown_x--;
+        }
       } else {
-        pan_cooldown_x--;
+        pan_cooldown_x = 0;
+      }
+
+      if (abs(cpos.dy) > 40) {
+        g_cfg.follow_output = false;
+        term_state.auto_track = false;
+        if (pan_cooldown_y <= 0) {
+          if (cpos.dy > 40) term_state.scroll_y--;
+          else if (cpos.dy < -40) term_state.scroll_y++;
+          pan_cooldown_y = 4;
+          term_state.dirty = true;
+        } else {
+          pan_cooldown_y--;
+        }
+      } else {
+        pan_cooldown_y = 0;
       }
     } else {
-      pan_cooldown_x = 0;
-    }
+      /* Arrow-key mode: same deadzone and cooldown, so a held stick repeats
+         rather than flooding the ring. */
+      if (abs(cpos.dx) > 40) {
+        if (pan_cooldown_x <= 0) {
+          rx_push_str(cpos.dx > 0 ? "\x1b[C" : "\x1b[D");
+          pan_cooldown_x = 4;
+        } else pan_cooldown_x--;
+      } else pan_cooldown_x = 0;
 
-    if (abs(cpos.dy) > 40) {
-      term_state.auto_track = false;
-      if (pan_cooldown_y <= 0) {
-        if (cpos.dy > 40) term_state.scroll_y--;
-        else if (cpos.dy < -40) term_state.scroll_y++;
-        pan_cooldown_y = 4;
-        term_state.dirty = true;
-      } else {
-        pan_cooldown_y--;
-      }
-    } else {
-      pan_cooldown_y = 0;
-    }
-
-    // Cursor blink check
-    static bool last_blink_on = false;
-    bool blink_on = (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
-    if (blink_on != last_blink_on) {
-      term_state.dirty = true;
-      last_blink_on = blink_on;
+      if (abs(cpos.dy) > 40) {
+        if (pan_cooldown_y <= 0) {
+          rx_push_str(cpos.dy > 0 ? "\x1b[A" : "\x1b[B");
+          pan_cooldown_y = 4;
+        } else pan_cooldown_y--;
+      } else pan_cooldown_y = 0;
     }
 
     // D-pad arrows
@@ -1051,17 +1213,25 @@ int main(int argc, char **argv) {
     if (kDown & KEY_DRIGHT) rx_push_str("\x1b[C");
     if (kDown & KEY_DLEFT)  rx_push_str("\x1b[D");
 
-    // Touch keyboard. It does its own edge detection off the touch state
-    // hidScanInput just sampled, so the only thing left here is to forward
-    // the byte to the guest. Drawing is dirty-tracked and only actually
-    // repaints on press and release, which matters on an Old 3DS where a
-    // full bottom-screen repaint is not free.
-    {
+    /* Both modes are dirty-tracked and only repaint when something changed:
+       a full bottom-screen repaint is not free on an Old 3DS. */
+    if (g_cfg.keyboard == 0) {
+      // The realtime keyboard does its own edge detection off the touch state
+      // hidScanInput just sampled, so the only thing left here is to forward
+      // the byte to the guest.
       CtrOskEvent ev;
       if (ctrOskUpdate(&g_osk, &ev)) rx_push((char)ev.byte);
       ctrOskDraw(&g_osk);
+    } else {
+      /* Line-compose mode. pane_prompt suspends this process for as long as
+         the applet is up - see the clock re-basing it arranges on the way
+         out. */
+      if (kDown & KEY_A) pane_prompt();
+      else if (tapped)   pane_touch(&touch);
+      pane_draw();
     }
 
+after_input:
     // Emulation itself now runs continuously on its own thread (see
     // EmuThreadEntry/EmuStepBatch above and the threadCreate call earlier
     // in this function) instead of being stepped from here in batches.
@@ -1113,9 +1283,16 @@ int main(int argc, char **argv) {
 
   if (disk_file) fclose(disk_file);
   CloseSwapFile();
-  v9p_exit();
+  /* v9p_exit unmounts archives and tears down hw3ds, neither of which exists
+     if v9p_init never ran. */
+  if (g_dev_9p) v9p_exit();
   if (vnet.soc_ready) socExit();
   if (vrng.ps_ready) psExit();
+
+  /* The page saves on close too, but the button shortcuts (zoom, ZL, ZR,
+     panning) change g_cfg without ever opening it. */
+  cfg_save(&g_cfg);
+
   free(ram_image);
   gfxExit();
   return 0;

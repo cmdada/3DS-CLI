@@ -31,8 +31,6 @@ running as ordinary homebrew inside Horizon OS.
    unpacks the rootfs to `sdmc:/rootfs.ext2`.
 3. Log in as `root` with a blank password.
 
-Delete `rootfs.ext2` to reset everything. It gets recreated next boot.
-
 ## Controls
 
 | Button | Action |
@@ -44,6 +42,7 @@ Delete `rootfs.ext2` to reset everything. It gets recreated next boot.
 | **Circle Pad** | Pan the viewport (turns off auto-follow) |
 | **D-Pad** | Arrow keys |
 | **START** | Quit to the Homebrew Launcher |
+| **SELECT** | Open settings menu, it's pretty self explanatory |
 
 | Key | Action |
 |---|---|

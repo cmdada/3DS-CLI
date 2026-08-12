@@ -62,12 +62,17 @@ typedef struct {
   int scroll_y;
   bool auto_track;
   bool use_5x7; // true = 5x7 font, false = 8x8 font
-  bool cursor_visible;
+  bool cursor_visible; // guest-driven, via DECTCEM (CSI ?25h/l)
+  bool cursor_blink;   // user-driven; false draws the cursor solid
   bool dirty;
 } TermState;
 
-// 16 Standard ANSI Colors resolved to RGB
-static const u32 ansi_colors[16] = {
+// 16 Standard ANSI Colors resolved to RGB.
+//
+// Not const: term_set_palette() swaps this out wholesale on a theme change.
+// The initial values are the conventional xterm 16, which "xterm classic" in
+// the settings restores.
+static u32 ansi_colors[16] = {
   // Normal colors
   0x000000, 0xcd0000, 0x00cd00, 0xcdcd00,
   0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
@@ -143,6 +148,7 @@ static inline void term_init(TermState *ts) {
   ts->auto_track = true;
   ts->use_5x7 = false;
   ts->cursor_visible = true;
+  ts->cursor_blink = true;
   ts->dirty = true;
 
   for (int i = 0; i < TERM_COLS * TERM_ROWS; i++) {
@@ -151,6 +157,67 @@ static inline void term_init(TermState *ts) {
     ts->grid[i].bg = ts->default_bg;
     ts->grid[i].flags = 0;
   }
+}
+
+/* Map one stored colour through a palette change.
+
+   Cells hold fully resolved 24-bit RGB, never palette indices, so a palette
+   swap has to be a rewrite rather than a pointer change.
+
+   Two accepted consequences: a cell coloured by a true-colour escape that
+   happens to equal a palette entry gets remapped with the rest, and when two
+   slots hold the same value the first match wins - hence fg/bg being checked
+   ahead of the table, so the terminal's own background never loses to an ANSI
+   slot sharing its value. */
+static inline u32 term_remap_color(u32 c,
+                                   const u32 old_pal[16], const u32 new_pal[16],
+                                   u32 old_fg, u32 new_fg,
+                                   u32 old_bg, u32 new_bg) {
+  if (c == old_bg) return new_bg;
+  if (c == old_fg) return new_fg;
+  for (int i = 0; i < 16; i++) if (c == old_pal[i]) return new_pal[i];
+  return c;
+}
+
+/* Install a new palette and rewrite everything already on screen to match.
+ *
+ * MUST be called with ui_lock held: it touches grid, sb_buf and default_fg/bg,
+ * all of which the emulation thread writes. Walking 18400 cells is a few
+ * milliseconds, so this is a one-shot, never something the draw path does.
+ */
+static inline void term_set_palette(TermState *ts, const u32 pal[16],
+                                    u32 fg, u32 bg) {
+  u32 old_pal[16];
+  memcpy(old_pal, ansi_colors, sizeof(old_pal));
+  u32 old_fg = ts->default_fg, old_bg = ts->default_bg;
+
+  if (memcmp(old_pal, pal, sizeof(old_pal)) == 0 && old_fg == fg && old_bg == bg)
+    return;
+
+  for (int y = 0; y < TERM_ROWS; y++) {
+    for (int x = 0; x < TERM_COLS; x++) {
+      TermCell *c = &ts->grid[y * TERM_COLS + x];
+      c->fg = term_remap_color(c->fg, old_pal, pal, old_fg, fg, old_bg, bg);
+      c->bg = term_remap_color(c->bg, old_pal, pal, old_fg, fg, old_bg, bg);
+    }
+  }
+  for (int s = 0; s < TERM_SCROLLBACK; s++) {
+    for (int x = 0; x < TERM_COLS; x++) {
+      TermCell *c = &ts->sb_buf[s][x];
+      c->fg = term_remap_color(c->fg, old_pal, pal, old_fg, fg, old_bg, bg);
+      c->bg = term_remap_color(c->bg, old_pal, pal, old_fg, fg, old_bg, bg);
+    }
+  }
+
+  /* The live SGR state too, or the next character the guest prints arrives in
+     the old theme's colours. */
+  ts->cur_fg = term_remap_color(ts->cur_fg, old_pal, pal, old_fg, fg, old_bg, bg);
+  ts->cur_bg = term_remap_color(ts->cur_bg, old_pal, pal, old_fg, fg, old_bg, bg);
+
+  memcpy(ansi_colors, pal, sizeof(ansi_colors));
+  ts->default_fg = fg;
+  ts->default_bg = bg;
+  ts->dirty = true;
 }
 
 static inline void term_handle_sgr(TermState *ts) {
@@ -668,7 +735,10 @@ static inline void term_draw(TermState *ts, u8 *fb) {
   }
 
   // 268 MHz system clock, so 268000LL ticks per ms. 500 ms period.
-  bool blink_on = (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
+  // With blinking off the cursor is always on: the setting stops the block
+  // flashing, it does not hide the caret.
+  bool blink_on = !ts->cursor_blink ||
+                  (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
 
   for (int vy = 0; vy < vis_rows; vy++) {
     int gy = ts->scroll_y + vy;

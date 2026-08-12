@@ -1244,7 +1244,11 @@ static void v9p_process_queue(uint8_t *ram) {
  * Init + MMIO
  * ------------------------------------------------------------------ */
 
-static void v9p_init(void) {
+/* The want_* flags come from the settings page and gate each tree separately,
+   since one virtio-9p channel carries all four. They short-circuit the archive
+   opens rather than closing them afterwards: an archive that was never mounted
+   needs no unmount. */
+static void v9p_init(bool want_sd, bool want_nand, bool want_twl) {
     memset(&v9p, 0, sizeof(v9p));
     v9p.queue_num = VQUEUE_SIZE;
     v9p.msize     = V9P_MSIZE;
@@ -1252,17 +1256,18 @@ static void v9p_init(void) {
     hw3ds_init();
 
     v9p_tree_ok[V9P_TREE_ROOT] = true; /* the synthetic listing always exists */
-    v9p_tree_ok[V9P_TREE_SD] = true;   /* sdmc is always mounted for homebrew */
+    v9p_tree_ok[V9P_TREE_SD] = want_sd;
     v9p_tree_ok[V9P_TREE_HW] = true;
 
     /* NAND needs permissions plain homebrew doesn't get. Under Luma3DS with
        extended homebrew perms these succeed; otherwise the trees simply
        stay absent and an attach to them fails cleanly. */
     FS_Path empty = { PATH_EMPTY, 1, "" };
-    v9p_sdmc_ok = R_SUCCEEDED(FSUSER_OpenArchive(&v9p_sdmc_archive, ARCHIVE_SDMC, empty));
-    v9p_tree_ok[V9P_TREE_NAND] =
+    v9p_sdmc_ok = want_sd &&
+        R_SUCCEEDED(FSUSER_OpenArchive(&v9p_sdmc_archive, ARCHIVE_SDMC, empty));
+    v9p_tree_ok[V9P_TREE_NAND] = want_nand &&
         R_SUCCEEDED(archiveMount(ARCHIVE_NAND_CTR_FS, empty, "v9nand"));
-    v9p_tree_ok[V9P_TREE_TWL] =
+    v9p_tree_ok[V9P_TREE_TWL] = want_twl &&
         R_SUCCEEDED(archiveMount(ARCHIVE_NAND_TWL_FS, empty, "v9twl"));
 }
 

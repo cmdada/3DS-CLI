@@ -2,6 +2,15 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (default: build-<sha>)'
+        required: false
+        type: string
+      name:
+        description: 'Release title (default: Build <short sha>)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -199,9 +208,17 @@ jobs:
           name: threeds-homebrew
           path: release/
 
+      # The dispatch inputs are optional, so fall back to the commit-derived
+      # tag and title when they are left blank.
       - name: Set release variables
         id: vars
-        run: echo "short_sha=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_NAME: ${{ inputs.name }}
+        run: |
+          short_sha=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "tag=${INPUT_TAG:-build-$GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "name=${INPUT_NAME:-Build $short_sha}" >> "$GITHUB_OUTPUT"
 
       # Bundle the rootfs into the Image so the whole install is just the
       # 3dsx plus one Image file - the app inflates rootfs.ext2 to the SD
@@ -227,8 +244,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.sha }}
-          name: Build ${{ steps.vars.outputs.short_sha }}
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.name }}
           target_commitish: ${{ github.sha }}
           files: 3ds_cli.zip
           make_latest: true

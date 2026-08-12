@@ -259,7 +259,7 @@ $(BANNER): $(BANNER_IMAGE) $(BANNER_AUDIO)
 	@echo "building banner ..."
 	@$(BANNERTOOL) makebanner -i $(BANNER_IMAGE) -a $(BANNER_AUDIO) -o $@
 
-$(OUTPUT).cia: $(OUTPUT).elf $(_3DSXDEPS) $(BANNER)
+$(OUTPUT).cia: $(OUTPUT).elf $(_3DSXDEPS) $(BANNER) $(APP_RSF)
 	@echo "building cia ..."
 	@$(MAKEROM) -f cia -o $@ -target t -elf $(OUTPUT).elf -rsf $(APP_RSF) -icon $(OUTPUT).smdh -banner $(BANNER) -exefslogo
 

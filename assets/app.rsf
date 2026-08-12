@@ -30,11 +30,17 @@ AccessControlInfo:
   CoreVersion                   : 2
   HandleTableSize               : 0x200
   SystemMode                    : 64MB
-  # New3DS only, both of them, and both matching what hbldr gives the .3dsx:
-  # core 2 is where the emulator thread goes on that model (see main()), and
-  # Legacy would otherwise cap a New3DS at the Old3DS memory region.
+  # New3DS only. Core 2 is where the emulator thread goes on that model (see
+  # main()), so this half has to stay on for #6 to remain fixed.
   CanAccessCore2                : true
-  SystemModeExt                 : 124MB
+  # Must stay Legacy. 2.2-hotfix also set this to 124MB - matching what hbldr
+  # gives a .3dsx - and that hard-locks a New3DS during startup with no Luma
+  # exception dump (issue #7). Confirmed by two builds off one ELF that
+  # differed in this single exheader byte and nothing else: 124MB locks,
+  # Legacy boots. The cost is that a New3DS reports the Old3DS-sized
+  # application region, so the RAM loop in main() settles a few MB lower than
+  # it otherwise could - which is what 2.0 through 2.2 always did.
+  SystemModeExt                 : Legacy
   ResourceLimitCategory         : Application
   MemoryType                    : Application
   SystemCallAccess:

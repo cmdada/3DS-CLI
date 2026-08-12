@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>   /* ftruncate, for preallocating the extracted rootfs */
 #include "terminal.h"
 #include <ctrosk.h>
 
@@ -228,8 +229,27 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
   memset(&zs, 0, sizeof(zs));
   if (inflateInit2(&zs, 15 + 16 /* gzip wrapper */) != Z_OK) return false;
 
-  FILE *out = fopen("sdmc:/rootfs.ext2", "wb");
+  /* Inflate to a scratch name and rename only once the whole thing is on the
+     card. Writing straight to rootfs.ext2 meant an extraction that never got
+     to finish - the user quits, the battery dies, the console is closed -
+     left a truncated file behind, and because OpenDiskFile only checks that
+     the path opens, every later launch would happily mount the half of a
+     filesystem that made it, with no way for the user to tell what had
+     happened. A leftover .part is inert: nothing opens it, and the next
+     attempt truncates it. */
+  static const char *kRootfsPath = "sdmc:/rootfs.ext2";
+  static const char *kRootfsPart = "sdmc:/rootfs.ext2.part";
+  FILE *out = fopen(kRootfsPart, "wb");
   if (!out) { inflateEnd(&zs); return false; }
+
+  /* Set the final length up front rather than growing the file 256KB at a
+     time for ~200MB. Extending a file makes the FS walk and extend its FAT
+     cluster chain, which gets more expensive the longer the chain already
+     is, so the incremental version got slower the further it went - the
+     first-boot extraction was running at a fraction of the card's actual
+     write speed and taking many minutes. Best-effort: if the FS declines,
+     the writes below still work, they're just back to being slow. */
+  if (ftruncate(fileno(out), (off_t)raw_len) == 0) rewind(out);
 
   static uint8_t inbuf[64 * 1024], outbuf[256 * 1024];
   uint32_t in_left = gz_len, done = 0, last_mb = 0;
@@ -263,7 +283,16 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
   fseek(f, 0, SEEK_SET);
   if (!ok || done != raw_len) {
     term_printf("Extraction failed, removing partial rootfs.\n");
-    remove("sdmc:/rootfs.ext2");
+    remove(kRootfsPart);
+    return false;
+  }
+  /* rename() onto an existing name fails on FAT, and this is reachable with
+     rootfs.ext2 already there: OpenDiskFile only failed to *open* it, which
+     a zero-byte or otherwise broken leftover would also do. */
+  remove(kRootfsPath);
+  if (rename(kRootfsPart, kRootfsPath) != 0) {
+    term_printf("Could not finalize rootfs.ext2 on the SD card.\n");
+    remove(kRootfsPart);
     return false;
   }
   term_printf("Rootfs extracted.\n");

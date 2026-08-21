@@ -25,6 +25,11 @@ DATE="$(date +%Y%m%d)"
 
 need() { [ -f "$1" ] || { echo "package: missing $1 (run the matching make target)" >&2; exit 1; }; }
 
+# ImageMagick 7 renamed the tool; runners and distros still ship either.
+if command -v magick >/dev/null 2>&1; then IM=magick
+elif command -v convert >/dev/null 2>&1; then IM=convert
+else echo "package: needs ImageMagick (magick or convert)" >&2; exit 1; fi
+
 # ── Wii: Open Shop Channel ────────────────────────────────────────────────
 need "$ROOT/dist/wii/3ds-cli.dol"
 APP="$WORK/osc/apps/3ds-cli"
@@ -33,7 +38,7 @@ cp "$ROOT/dist/wii/3ds-cli.dol" "$APP/boot.dol"
 cp "$IMAGE" "$WORK/osc/Image"
 
 # 128x48 is the icon size the Open Shop Channel expects.
-magick "$ROOT/banner.png" -resize 128x48 -background '#191724' -gravity center \
+"$IM" "$ROOT/banner.png" -resize 128x48 -background '#191724' -gravity center \
        -extent 128x48 "$APP/icon.png"
 
 cat > "$APP/meta.xml" <<XML

@@ -1,5 +1,10 @@
 # Build outputs
 build/
+build-wiiu/
+build-switch/
+build-wii/
+build-gamecube/
+dist/
 *.3dsx
 *.smdh
 *.elf

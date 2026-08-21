@@ -4,19 +4,37 @@
 #include <stdlib.h>
 #include <malloc.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <3ds.h>
+#include "plat.h"
+
+#define VIRTIO_NET_BASE   0x10002000u
+#define VIRTIO_NET_SIZE   0x1000u
+
+/* A console with no network stack at all - the GameCube, which needs a
+   Broadband Adapter nobody can assume - compiles this device out entirely
+   rather than linking against socket calls its libc does not have. The
+   device then simply never answers, so the guest's virtio-mmio probe skips
+   the node exactly as it does when the user turns networking off. */
+#ifndef PLAT_HAS_NET
+
+static struct { bool soc_ready; } vnet;
+
+static inline void     vnet_init(void)  { vnet.soc_ready = false; }
+static inline void     vnet_poll(uint8_t *ram) { (void)ram; }
+static inline uint32_t vnet_load(uint32_t addy) { (void)addy; return 0; }
+static inline void     vnet_store(uint32_t addy, uint32_t val, uint8_t *ram) {
+    (void)addy; (void)val; (void)ram;
+}
+
+#else
+
+#include "plat_sock.h"
 
 /*
  * Virtio-net device backed by a small userspace NAT ("slirp"), the same
  * technique QEMU's -netdev user uses: the guest gets a private virtual
  * subnet (10.0.2.0/24) with a synthetic gateway/DHCP/DNS server at
  * 10.0.2.2, and every UDP/TCP flow the guest opens is transparently
- * proxied 1:1 onto a real BSD socket via the 3DS's SOC service, which
+ * proxied 1:1 onto a real BSD socket on the console's own stack, which
  * talks out over whatever network (WiFi) the 3DS is actually connected
  * to. No root/raw sockets are needed because we never forge source
  * addresses on the real wire — we just terminate+relay each flow.
@@ -34,8 +52,6 @@
  *    evicted to make room.
  */
 
-#define VIRTIO_NET_BASE   0x10002000u
-#define VIRTIO_NET_SIZE   0x1000u
 
 #define VNET_MTU          1500
 #define VNET_FRAME_MAX    1536
@@ -127,8 +143,8 @@ static int build_eth_ip(uint8_t *out, const uint8_t *dst_mac, const uint8_t *src
     ip[9] = proto;
     ip[10] = 0; ip[11] = 0;           /* csum placeholder */
     uint32_t sbe = htonl(src_ip), dbe = htonl(dst_ip);
-    memcpy(ip + 12, &sbe, 4);
-    memcpy(ip + 16, &dbe, 4);
+    g_st32(ip + 12, sbe);
+    g_st32(ip + 16, dbe);
     uint16_t csum = cksum_fold(cksum_add(0, ip, 20));
     ip[10] = csum >> 8; ip[11] = csum & 0xff;
 
@@ -151,7 +167,7 @@ static void queue_ip_frame(const uint8_t *dst_mac, uint32_t src_ip, uint32_t dst
 static void vnet_handle_arp(const uint8_t *pkt, int len) {
     if (len < 28) return;
     uint16_t oper = (pkt[6] << 8) | pkt[7];
-    uint32_t tpa; memcpy(&tpa, pkt + 24, 4); tpa = ntohl(tpa);
+    uint32_t tpa; tpa = g_ld32(pkt + 24); tpa = ntohl(tpa);
     if (oper != 1 /* request */ || tpa != vnet_ip_gw) return;
 
     static uint8_t frame[VNET_HDR_LEN + 42];
@@ -164,7 +180,7 @@ static void vnet_handle_arp(const uint8_t *pkt, int len) {
     a[0]=0; a[1]=1; a[2]=0x08; a[3]=0; a[4]=6; a[5]=4;
     a[6]=0; a[7]=2; /* reply */
     memcpy(a + 8, vnet_gw_mac, 6);
-    uint32_t gwbe = htonl(vnet_ip_gw); memcpy(a + 14, &gwbe, 4);
+    uint32_t gwbe = htonl(vnet_ip_gw); g_st32(a + 14, gwbe);
     memcpy(a + 18, pkt + 8, 6);      /* target = requester */
     memcpy(a + 24, pkt + 14, 4);     /* target ip = requester's spa (offset 14 in arp) */
     vnet_pend_push(frame, VNET_HDR_LEN + 42);
@@ -180,20 +196,20 @@ static void vnet_send_dhcp(const uint8_t *req, int reqlen, uint8_t msg_type, con
     rep[1] = 1; rep[2] = 6; rep[3] = 0;
     memcpy(rep + 4, req + 4, 4);           /* xid */
     uint32_t yiaddr = htonl(vnet_ip_guest);
-    memcpy(rep + 16, &yiaddr, 4);
+    g_st32(rep + 16, yiaddr);
     uint32_t siaddr = htonl(vnet_ip_gw);
-    memcpy(rep + 20, &siaddr, 4);
+    g_st32(rep + 20, siaddr);
     memcpy(rep + 28, cmac, 6);
     rep[236]=99; rep[237]=130; rep[238]=83; rep[239]=99; /* magic cookie */
     int o = 240;
     rep[o++] = 53; rep[o++] = 1; rep[o++] = msg_type;            /* DHCP msg type */
-    rep[o++] = 54; rep[o++] = 4; { uint32_t v=htonl(vnet_ip_gw); memcpy(rep+o,&v,4); o+=4; } /* server id */
-    rep[o++] = 1;  rep[o++] = 4; { uint32_t v=htonl(0xffffff00u); memcpy(rep+o,&v,4); o+=4; } /* subnet */
-    rep[o++] = 3;  rep[o++] = 4; { uint32_t v=htonl(vnet_ip_gw); memcpy(rep+o,&v,4); o+=4; } /* router */
+    rep[o++] = 54; rep[o++] = 4; { uint32_t v=htonl(vnet_ip_gw); g_st32(rep+o, v); o+=4; } /* server id */
+    rep[o++] = 1;  rep[o++] = 4; { uint32_t v=htonl(0xffffff00u); g_st32(rep+o, v); o+=4; } /* subnet */
+    rep[o++] = 3;  rep[o++] = 4; { uint32_t v=htonl(vnet_ip_gw); g_st32(rep+o, v); o+=4; } /* router */
     rep[o++] = 6;  rep[o++] = 8;
-      { uint32_t v=htonl(vnet_ip_dns1); memcpy(rep+o,&v,4); o+=4; }
-      { uint32_t v=htonl(vnet_ip_dns2); memcpy(rep+o,&v,4); o+=4; }
-    rep[o++] = 51; rep[o++] = 4; { uint32_t v=htonl(86400u); memcpy(rep+o,&v,4); o+=4; } /* lease */
+      { uint32_t v=htonl(vnet_ip_dns1); g_st32(rep+o, v); o+=4; }
+      { uint32_t v=htonl(vnet_ip_dns2); g_st32(rep+o, v); o+=4; }
+    rep[o++] = 51; rep[o++] = 4; { uint32_t v=htonl(86400u); g_st32(rep+o, v); o+=4; } /* lease */
     rep[o++] = 255;
     int udplen = 8 + o;
     static uint8_t udp[8 + 300];
@@ -263,22 +279,22 @@ static udp_flow_t *udp_find_or_create(uint16_t guest_port, uint32_t dst_ip, uint
         if (udp_flows[i].last_tick < oldest_tick) { oldest_tick = udp_flows[i].last_tick; oldest = i; }
     }
     if (oldest < 0) return NULL;
-    if (udp_flows[oldest].used) close(udp_flows[oldest].fd);
+    if (udp_flows[oldest].used) closesocket(udp_flows[oldest].fd);
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return NULL;
-    fcntl(fd, F_SETFL, O_NONBLOCK);
+    PLAT_SOCK_SET_NONBLOCK(fd);
     udp_flow_t *f = &udp_flows[oldest];
     f->used = true; f->fd = fd; f->guest_port = guest_port;
     f->dst_ip = dst_ip; f->dst_port = dst_port;
     memcpy(f->guest_mac, gmac, 6);
-    f->last_tick = svcGetSystemTick();
+    f->last_tick = plat_us();
     return f;
 }
 
 static void vnet_handle_udp(const uint8_t *eth, const uint8_t *ip, const uint8_t *udp, int udplen) {
     if (udplen < 8) return;
-    uint32_t src_ip; memcpy(&src_ip, ip + 12, 4); src_ip = ntohl(src_ip);
-    uint32_t dst_ip; memcpy(&dst_ip, ip + 16, 4); dst_ip = ntohl(dst_ip);
+    uint32_t src_ip; src_ip = g_ld32(ip + 12); src_ip = ntohl(src_ip);
+    uint32_t dst_ip; dst_ip = g_ld32(ip + 16); dst_ip = ntohl(dst_ip);
     uint16_t sport = (udp[0]<<8)|udp[1], dport = (udp[2]<<8)|udp[3];
     const uint8_t *payload = udp + 8;
     int paylen = udplen - 8;
@@ -288,7 +304,7 @@ static void vnet_handle_udp(const uint8_t *eth, const uint8_t *ip, const uint8_t
 
     udp_flow_t *f = udp_find_or_create(sport, dst_ip, dport, eth + 6);
     if (!f) return;
-    f->last_tick = svcGetSystemTick();
+    f->last_tick = plat_us();
 
     struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET; sa.sin_port = htons(f->dst_port);
@@ -300,8 +316,8 @@ static void udp_poll(void) {
     for (int i = 0; i < UDP_MAX_FLOWS; i++) {
         udp_flow_t *f = &udp_flows[i];
         if (!f->used) continue;
-        if (svcGetSystemTick() - f->last_tick > 120ull * 1000000ull * 268ull) { /* ~120s idle */
-            close(f->fd); f->used = false; continue;
+        if (plat_us() - f->last_tick > 120ull * 1000000ull) { /* ~120s idle */
+            closesocket(f->fd); f->used = false; continue;
         }
         for (;;) {
             static uint8_t buf[1500];
@@ -316,7 +332,7 @@ static void udp_poll(void) {
             udp[6]=0; udp[7]=0;
             memcpy(udp+8, buf, n);
             queue_ip_frame(f->guest_mac, ntohl(from.sin_addr.s_addr), vnet_ip_guest, 17, udp, udplen);
-            f->last_tick = svcGetSystemTick();
+            f->last_tick = plat_us();
         }
     }
 }
@@ -354,8 +370,8 @@ static void tcp_send_seg(tcp_conn_t *c, uint8_t flags, const uint8_t *payload, i
     uint8_t seg[20 + 1460];
     seg[0]=c->dst_port>>8; seg[1]=c->dst_port&0xff;
     seg[2]=c->guest_port>>8; seg[3]=c->guest_port&0xff;
-    uint32_t seq = htonl(c->seq_us); memcpy(seg+4,&seq,4);
-    uint32_t ack = htonl(c->ack_them); memcpy(seg+8,&ack,4);
+    uint32_t seq = htonl(c->seq_us); g_st32(seg+4, seq);
+    uint32_t ack = htonl(c->ack_them); g_st32(seg+8, ack);
     seg[12] = (5 << 4); seg[13] = flags;
     seg[14] = 0xff; seg[15] = 0xff; /* window */
     seg[16]=0; seg[17]=0; seg[18]=0; seg[19]=0;
@@ -377,7 +393,7 @@ static void tcp_send_seg(tcp_conn_t *c, uint8_t flags, const uint8_t *payload, i
     if (flags & 0x02) c->seq_us += 1; /* SYN consumes a sequence number */
     if (flags & 0x01) c->seq_us += 1; /* FIN consumes a sequence number */
     c->seq_us += paylen;
-    c->last_tick = svcGetSystemTick();
+    c->last_tick = plat_us();
 }
 
 static tcp_conn_t *tcp_find(uint16_t guest_port, uint32_t dst_ip, uint16_t dst_port) {
@@ -389,18 +405,18 @@ static tcp_conn_t *tcp_find(uint16_t guest_port, uint32_t dst_ip, uint16_t dst_p
 }
 
 static void tcp_close_slot(tcp_conn_t *c) {
-    if (c->fd >= 0) close(c->fd);
+    if (c->fd >= 0) closesocket(c->fd);
     memset(c, 0, sizeof(*c));
     c->fd = -1;
 }
 
 static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t *tcp, int tcplen) {
     if (tcplen < 20) return;
-    uint32_t src_ip; memcpy(&src_ip, ip + 12, 4); src_ip = ntohl(src_ip);
-    uint32_t dst_ip; memcpy(&dst_ip, ip + 16, 4); dst_ip = ntohl(dst_ip);
+    uint32_t src_ip; src_ip = g_ld32(ip + 12); src_ip = ntohl(src_ip);
+    uint32_t dst_ip; dst_ip = g_ld32(ip + 16); dst_ip = ntohl(dst_ip);
     if (src_ip != vnet_ip_guest) return;
     uint16_t sport = (tcp[0]<<8)|tcp[1], dport = (tcp[2]<<8)|tcp[3];
-    uint32_t seq; memcpy(&seq, tcp+4, 4); seq = ntohl(seq);
+    uint32_t seq; seq = g_ld32(tcp+4); seq = ntohl(seq);
     uint8_t doff = (tcp[12] >> 4) * 4;
     uint8_t flags = tcp[13];
     const uint8_t *payload = tcp + doff;
@@ -422,7 +438,7 @@ static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t
         c = &tcp_conns[slot];
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) return;
-        fcntl(fd, F_SETFL, O_NONBLOCK);
+        PLAT_SOCK_SET_NONBLOCK(fd);
         struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET; sa.sin_port = htons(dport);
         sa.sin_addr.s_addr = htonl(dst_ip);
@@ -431,9 +447,9 @@ static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t
         c->fd = fd;
         c->guest_port = sport; c->dst_port = dport; c->dst_ip = dst_ip;
         memcpy(c->guest_mac, eth + 6, 6);
-        c->seq_us = (uint32_t)svcGetSystemTick();
+        c->seq_us = (uint32_t)plat_us();
         c->ack_them = seq + 1;
-        c->last_tick = svcGetSystemTick();
+        c->last_tick = plat_us();
         /* Optimistic SYN-ACK: assume connect succeeds; RST later if not. */
         tcp_send_seg(c, 0x12 /* SYN|ACK */, NULL, 0);
         return;
@@ -450,7 +466,7 @@ static void vnet_handle_tcp(const uint8_t *eth, const uint8_t *ip, const uint8_t
         return;
     }
 
-    c->last_tick = svcGetSystemTick();
+    c->last_tick = plat_us();
     if (paylen > 0) {
         if (c->fd >= 0) send(c->fd, payload, paylen, 0);
         c->ack_them = seq + paylen;
@@ -476,8 +492,8 @@ static void tcp_poll(void) {
             int slot = -1;
             for (int i = 0; i < TCP_MAX_CONNS; i++)
                 if (tcp_conns[i].state == TCP_FREE) { slot = i; break; }
-            if (slot < 0) { close(afd); break; }
-            fcntl(afd, F_SETFL, O_NONBLOCK);
+            if (slot < 0) { closesocket(afd); break; }
+            PLAT_SOCK_SET_NONBLOCK(afd);
             static uint16_t fwd_port_seq = 0;
             tcp_conn_t *c = &tcp_conns[slot];
             c->state = TCP_SYN_GUEST;
@@ -486,7 +502,7 @@ static void tcp_poll(void) {
             c->dst_ip = vnet_ip_gw;
             c->dst_port = (uint16_t)(40000u + (fwd_port_seq++ & 0x1fff));
             memcpy(c->guest_mac, vnet_guest_mac, 6);
-            c->seq_us = (uint32_t)svcGetSystemTick();
+            c->seq_us = (uint32_t)plat_us();
             c->ack_them = 0;
             c->guest_fin_seen = c->local_fin_sent = false;
             c->syn_retries = 0;
@@ -497,13 +513,13 @@ static void tcp_poll(void) {
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         tcp_conn_t *c = &tcp_conns[i];
         if (c->state == TCP_FREE) continue;
-        if (svcGetSystemTick() - c->last_tick > 300ull * 1000000ull * 268ull) { tcp_close_slot(c); continue; }
+        if (plat_us() - c->last_tick > 300ull * 1000000ull) { tcp_close_slot(c); continue; }
 
         if (c->state == TCP_SYN_GUEST) {
             /* Retransmit our SYN until the guest answers (it may still be
                booting); give up after ~30 tries. tcp_send_seg advanced
                seq_us for the SYN, so rewind before resending the same one. */
-            if (svcGetSystemTick() - c->last_tick > 1000ull * 1000ull * 268ull) {
+            if (plat_us() - c->last_tick > 1000ull * 1000ull) {
                 if (++c->syn_retries > 30) { tcp_close_slot(c); continue; }
                 c->seq_us -= 1;
                 tcp_send_seg(c, 0x02, NULL, 0);
@@ -556,7 +572,7 @@ static void vnet_dispatch_frame(const uint8_t *f, int len) {
     if (proto == 17) vnet_handle_udp(f, l3, l4, l4len);
     else if (proto == 6) vnet_handle_tcp(f, l3, l4, l4len);
     else if (proto == 1) {
-        uint32_t src_ip; memcpy(&src_ip, l3 + 12, 4); src_ip = ntohl(src_ip);
+        uint32_t src_ip; src_ip = g_ld32(l3 + 12); src_ip = ntohl(src_ip);
         vnet_handle_icmp(f + 6, src_ip, l4, l4len);
     }
 }
@@ -569,10 +585,10 @@ static void vnet_process_tx(uint8_t *ram) {
     uint8_t *used_ring  = guest_ptr(ram, q->queue_device_lo, 6u);
     if (!desc_table || !avail_ring || !used_ring) return;
 
-    uint16_t avail_idx; memcpy(&avail_idx, avail_ring + 2, 2);
+    uint16_t avail_idx; avail_idx = g_ld16(avail_ring + 2);
     while (q->last_avail_idx != avail_idx) {
         uint16_t ring_pos = q->last_avail_idx % VQUEUE_SIZE;
-        uint16_t head; memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        uint16_t head; head = g_ld16(avail_ring + 4u + ring_pos * 2u);
         q->last_avail_idx++;
 
         static uint8_t frame[VNET_FRAME_MAX];
@@ -600,12 +616,12 @@ static void vnet_process_tx(uint8_t *ram) {
         }
         if (flen > 0) vnet_dispatch_frame(frame, flen);
 
-        uint16_t used_idx_val; memcpy(&used_idx_val, used_ring + 2, 2);
+        uint16_t used_idx_val; used_idx_val = g_ld16(used_ring + 2);
         uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
         uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
         uint32_t hd32 = head, wl = flen;
-        memcpy(ue + 0, &hd32, 4); memcpy(ue + 4, &wl, 4);
-        used_idx_val++; memcpy(used_ring + 2, &used_idx_val, 2);
+        g_st32(ue + 0, hd32); g_st32(ue + 4, wl);
+        used_idx_val++; g_st16(used_ring + 2, used_idx_val);
         vnet.int_status |= 1u;
     }
 }
@@ -619,10 +635,10 @@ static void vnet_pump_rx(uint8_t *ram) {
     uint8_t *used_ring  = guest_ptr(ram, q->queue_device_lo, 6u);
     if (!desc_table || !avail_ring || !used_ring) return;
 
-    uint16_t avail_idx; memcpy(&avail_idx, avail_ring + 2, 2);
+    uint16_t avail_idx; avail_idx = g_ld16(avail_ring + 2);
     while (vnet_pend_tail != vnet_pend_head && q->last_avail_idx != avail_idx) {
         uint16_t ring_pos = q->last_avail_idx % VQUEUE_SIZE;
-        uint16_t head; memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        uint16_t head; head = g_ld16(avail_ring + 4u + ring_pos * 2u);
 
         vnet_pend_t *p = &vnet_pend[vnet_pend_tail];
         uint32_t written = 0;
@@ -643,12 +659,12 @@ static void vnet_pump_rx(uint8_t *ram) {
         q->last_avail_idx++;
         vnet_pend_tail = (vnet_pend_tail + 1) % VNET_PEND_N;
 
-        uint16_t used_idx_val; memcpy(&used_idx_val, used_ring + 2, 2);
+        uint16_t used_idx_val; used_idx_val = g_ld16(used_ring + 2);
         uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
         uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
         uint32_t hd32 = head;
-        memcpy(ue + 0, &hd32, 4); memcpy(ue + 4, &written, 4);
-        used_idx_val++; memcpy(used_ring + 2, &used_idx_val, 2);
+        g_st32(ue + 0, hd32); g_st32(ue + 4, written);
+        used_idx_val++; g_st16(used_ring + 2, used_idx_val);
         vnet.int_status |= 1u;
     }
 }
@@ -682,9 +698,7 @@ static void vnet_init(void) {
     inet_aton(DNS2_IP_STR, &a);  vnet_ip_dns2  = ntohl(a.s_addr);
     vnet_ip_bcast = 0xffffffffu;
 
-    static u32 *soc_buf = NULL;
-    if (!soc_buf) soc_buf = (u32 *)memalign(0x1000, 0x100000);
-    vnet.soc_ready = soc_buf && R_SUCCEEDED(socInit(soc_buf, 0x100000));
+    vnet.soc_ready = plat_net_init();
 
     /* ssh port forward: connections to <3DS ip>:2222 land on the guest's
        dropbear. Failure is non-fatal - outbound NAT still works. */
@@ -698,10 +712,10 @@ static void vnet_init(void) {
             sa.sin_port = htons(VNET_SSH_FWD_PORT);
             sa.sin_addr.s_addr = htonl(INADDR_ANY);
             if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(lfd, 2) == 0) {
-                fcntl(lfd, F_SETFL, O_NONBLOCK);
+                PLAT_SOCK_SET_NONBLOCK(lfd);
                 ssh_listen_fd = lfd;
             } else {
-                close(lfd);
+                closesocket(lfd);
             }
         }
     }
@@ -778,3 +792,5 @@ static void vnet_store(uint32_t addy, uint32_t val, uint8_t *ram) {
     default: break;
     }
 }
+
+#endif /* PLAT_HAS_NET */

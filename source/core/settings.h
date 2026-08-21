@@ -3,8 +3,8 @@
 
 /* The settings page, on the bottom screen.
  *
- * Include from main.c *after* term_state, ui_lock, g_osk, rx_push_str and the
- * virtio device headers exist - it reads all of them.
+ * Include from machine.c *after* term_state, ui_lock, the panel keyboard,
+ * rx_push_str and the virtio device headers exist - it reads all of them.
  *
  * Rules this file lives under (threading):
  *
@@ -14,9 +14,9 @@
  *   default_bg, the grid or the scrollback - which is what a theme change
  *   does.
  *
- * - The bottom screen is single-buffered and ctrOskDraw() clears all of it, so
+ * - The panel is single-buffered and the keyboard's draw clears all of it, so
  *   the keyboard and this page cannot both be up. While this page is open
- *   main.c does not call ctrOskDraw at all; closing it calls ctrOskInvalidate
+ *   machine.c does not call pkbd_draw at all; closing it calls pkbd_invalidate
  *   so the keyboard paints itself back.
  *
  * - Drawing is gated on settings_dirty: repainting 320x240 by hand every tick
@@ -27,28 +27,32 @@
  * snapshot, never g_cfg.
  */
 
-#include <3ds.h>
+#include "plat.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
 #include "config.h"
 #include "theme.h"
-#include "ui3ds.h"
+#include "ui.h"
 
 /* ------------------------------------------------------------------ layout */
 
+/* Margins and row height are fixed; everything that spans the panel is
+   derived from it, so a console with a wider panel gets wider rows rather
+   than a small island in the middle. On a 320x240 panel these come out at
+   exactly the numbers they were originally written as. */
 #define SET_TAB_H     26
 #define SET_CARD_X     6
 #define SET_CARD_Y    30
-#define SET_CARD_W   308
-#define SET_CARD_H   178
+#define SET_CARD_W   (UI_W - 2 * SET_CARD_X)
+#define SET_CARD_H   (UI_H - SET_CARD_Y - 32)
 #define SET_ROW_X     14
-#define SET_ROW_W    286
+#define SET_ROW_W    (UI_W - 2 * SET_ROW_X - 6)
 #define SET_ROW_Y0    38
 #define SET_ROW_H     26
-#define SET_ROWS_VIS   6
-#define SET_FOOT_Y   214
+#define SET_ROWS_VIS  ((SET_CARD_H - 4) / SET_ROW_H)
+#define SET_FOOT_Y   (UI_H - 26)
 
 /* ------------------------------------------------------------- row model -- */
 
@@ -163,7 +167,6 @@ static int  settings_confirm = 0; /* ACT_* awaiting a yes/no                 */
 static bool settings_quit  = false;
 static char settings_toast[40];   /* one-line result of the last action      */
 
-static CtrOskTheme g_osk_theme;
 
 /* Set by main() once the Image has been sized. Without a bundled rootfs there
    is nothing to re-extract, and resetting would delete the only copy. */
@@ -273,33 +276,34 @@ static void settings_set_section(int sec) {
 static void settings_run_action(int act);
 
 /* Returns false when the page has just closed. */
-static bool settings_update(u32 kDown, const touchPosition *touch, bool touched) {
+static bool settings_update(const plat_input_t *in) {
+  uint32_t kDown = in->down;
   const Section *s = &sections[settings_sec];
 
   /* Confirmations are modal: nothing else on the page responds while one is
      up. */
   if (settings_confirm) {
-    if (kDown & KEY_A) { settings_run_action(settings_confirm); settings_confirm = 0; }
-    else if (kDown & (KEY_B | KEY_SELECT)) { settings_confirm = 0; }
+    if (kDown & PLAT_BTN_A) { settings_run_action(settings_confirm); settings_confirm = 0; }
+    else if (kDown & (PLAT_BTN_B | PLAT_BTN_SETTINGS)) { settings_confirm = 0; }
     else return true;
     settings_dirty = true;
     return true;
   }
 
-  if (kDown & (KEY_B | KEY_SELECT)) { settings_open = false; return false; }
+  if (kDown & (PLAT_BTN_B | PLAT_BTN_SETTINGS)) { settings_open = false; return false; }
 
-  if (kDown & KEY_L) { settings_set_section(settings_sec - 1); settings_dirty = true; }
-  if (kDown & KEY_R) { settings_set_section(settings_sec + 1); settings_dirty = true; }
-  if (kDown & KEY_DUP)   { settings_move(-1); settings_dirty = true; }
-  if (kDown & KEY_DDOWN) { settings_move(+1); settings_dirty = true; }
+  if (kDown & PLAT_BTN_ZOOM_OUT) { settings_set_section(settings_sec - 1); settings_dirty = true; }
+  if (kDown & PLAT_BTN_ZOOM_IN) { settings_set_section(settings_sec + 1); settings_dirty = true; }
+  if (kDown & PLAT_BTN_UP)   { settings_move(-1); settings_dirty = true; }
+  if (kDown & PLAT_BTN_DOWN) { settings_move(+1); settings_dirty = true; }
 
   /* A tap selects the row under the finger and, for a stateful row, also
      activates it - one gesture, not two. Rows are 26px tall because a finger
      lands only near where it was aimed. */
-  if (touched && touch->py >= SET_ROW_Y0 &&
-      touch->py < SET_ROW_Y0 + SET_ROWS_VIS * SET_ROW_H &&
-      touch->px >= SET_ROW_X && touch->px < SET_ROW_X + SET_ROW_W) {
-    int idx = settings_top + (touch->py - SET_ROW_Y0) / SET_ROW_H;
+  if (in->ptr_tapped && in->ptr_y >= SET_ROW_Y0 &&
+      in->ptr_y < SET_ROW_Y0 + SET_ROWS_VIS * SET_ROW_H &&
+      in->ptr_x >= SET_ROW_X && in->ptr_x < SET_ROW_X + SET_ROW_W) {
+    int idx = settings_top + (in->ptr_y - SET_ROW_Y0) / SET_ROW_H;
     if (idx < s->n && row_focusable(&s->rows[idx])) {
       settings_sel = idx;
       const Row *r = &s->rows[idx];
@@ -317,15 +321,15 @@ static bool settings_update(u32 kDown, const touchPosition *touch, bool touched)
   if (settings_sel >= s->n) return true;
   const Row *r = &s->rows[settings_sel];
 
-  if (kDown & (KEY_A | KEY_DRIGHT | KEY_DLEFT)) {
+  if (kDown & (PLAT_BTN_A | PLAT_BTN_RIGHT | PLAT_BTN_LEFT)) {
     if (r->kind == ROW_ACTION) {
-      if (kDown & KEY_A) {
+      if (kDown & PLAT_BTN_A) {
         /* The one action here that cannot be undone by flipping a row back. */
         if (r->id == ACT_RESET_ROOTFS) settings_confirm = r->id;
         else settings_run_action(r->id);
       }
     } else {
-      row_cycle(&g_cfg, r, (kDown & KEY_DLEFT) ? -1 : +1);
+      row_cycle(&g_cfg, r, (kDown & PLAT_BTN_LEFT) ? -1 : +1);
       settings_apply_live();
     }
     settings_dirty = true;
@@ -407,23 +411,23 @@ static void settings_draw(void) {
 }
 
 /* ------------------------------------------------- apply, actions, info --- */
-/* Everything below reaches into main.c's globals - term_state, ui_lock, g_osk
+/* Everything below reaches into machine.c's globals - term_state, ui_lock
    and the virtio devices. */
 
 static void settings_apply_live(void) {
   const AdaPalette *p = ada_palette(g_cfg.theme);
 
-  u32 pal[16];
+  uint32_t pal[16];
   ada_ansi16(p, g_cfg.theme, pal);
-  u32 fg = p->text;
+  uint32_t fg = p->text;
   /* A true 0x000000, not a near-black theme colour - the contrast is the whole
      point of the option. */
-  u32 bg = g_cfg.top_black ? 0x000000 : p->base;
+  uint32_t bg = g_cfg.top_black ? 0x000000 : p->base;
 
   /* The one part of a settings change that touches emu-thread-owned state. */
-  LightLock_Lock(&ui_lock);
+  plat_mutex_lock(&ui_lock);
   term_set_palette(&term_state, pal, fg, bg);
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
 
   term_state.use_5x7      = g_cfg.use_5x7;
   term_state.zoom_x       = g_cfg.zoom_x;
@@ -433,11 +437,7 @@ static void settings_apply_live(void) {
   term_state.auto_track   = g_cfg.follow_output;
   term_state.dirty        = true;
 
-  ada_osk_theme(p, &g_osk_theme);
-  g_osk.theme            = &g_osk_theme;
-  g_osk.backspace_as_del = g_cfg.backspace_del;
-  g_osk.shift_is_oneshot = g_cfg.shift_oneshot;
-  ctrOskInvalidate(&g_osk);
+  pkbd_apply(p, g_cfg.backspace_del, g_cfg.shift_oneshot, g_cfg.keyboard);
 
   settings_dirty = true;
 }
@@ -475,7 +475,7 @@ static void settings_run_action(int act) {
 static void settings_info_text(int id, char *out, size_t n) {
   switch (id) {
     case INFO_MODEL:
-      snprintf(out, n, "%s", g_new_3ds ? "New3DS" : "Old3DS");
+      snprintf(out, n, "%s", plat_model());
       break;
     case INFO_RAM:
       snprintf(out, n, "%lu MB", (unsigned long)(ram_amt >> 20));
@@ -484,11 +484,15 @@ static void settings_info_text(int id, char *out, size_t n) {
       /* What actually came up this launch, not what the config asked for. */
       char b[40];
       b[0] = '\0';
-      if (vnet.soc_ready)               strncat(b, "net ",  sizeof(b) - strlen(b) - 1);
-      if (v9p_tree_ok[V9P_TREE_NAND])   strncat(b, "nand ", sizeof(b) - strlen(b) - 1);
-      if (v9p_tree_ok[V9P_TREE_TWL])    strncat(b, "twl ",  sizeof(b) - strlen(b) - 1);
-      if (hw.sensors)                   strncat(b, "sens ", sizeof(b) - strlen(b) - 1);
-      if (vrng.ps_ready)                strncat(b, "rng",   sizeof(b) - strlen(b) - 1);
+      if (vnet.soc_ready)            strncat(b, "net ",  sizeof(b) - strlen(b) - 1);
+      /* Every real tree that came up, named, the set differs per console. */
+      for (int i = 0; i < V9P_TREE_COUNT; i++)
+        if (v9p_tree_ok[i] && strcmp(v9p_tree_aname[i], "sd")) {
+          strncat(b, v9p_tree_aname[i], sizeof(b) - strlen(b) - 1);
+          strncat(b, " ", sizeof(b) - strlen(b) - 1);
+        }
+      if (plat_caps()->sensors)      strncat(b, "sens ", sizeof(b) - strlen(b) - 1);
+      if (vrng.ps_ready)             strncat(b, "rng",   sizeof(b) - strlen(b) - 1);
       snprintf(out, n, "%s", b[0] ? b : "none");
       break;
     }
@@ -507,12 +511,12 @@ static void settings_enter(void) {
   settings_dirty   = true;
 }
 
-/* Hands the bottom screen back. ctrOskDraw is a no-op unless it thinks
-   something changed, and it has no idea this page painted over it. */
+/* Hands the panel back. The keyboard is dirty-tracked and has no idea this
+   page painted over it, so it has to be told. */
 static void settings_leave(void) {
   settings_open = false;
   cfg_save(&g_cfg);
-  ctrOskInvalidate(&g_osk);
+  pkbd_invalidate();
 }
 
 #endif /* SETTINGS_H */

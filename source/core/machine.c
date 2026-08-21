@@ -1,4 +1,3 @@
-#include <3ds.h>
 #include <zlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -6,11 +5,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>   /* ftruncate, for preallocating the extracted rootfs */
+#include "plat.h"
 #include "terminal.h"
-#include <ctrosk.h>
 #include "theme.h"    /* the adabit palette, shared by the terminal and the UI */
-#include "config.h"   /* sdmc:/3ds-cli.cfg                                     */
-#include "ui3ds.h"    /* bottom-screen drawing primitives                      */
+#include "config.h"   /* <SD>/3ds-cli.cfg                                      */
+#include "ui.h"       /* bottom-screen drawing primitives                     */
 
 TermState term_state;
 
@@ -18,12 +17,6 @@ TermState term_state;
    emulator reads - see the g_dev_* snapshot below. */
 static Cfg g_cfg;
 
-u32 __ctru_linear_heap_size = 8 * 1024 * 1024;
-
-/* New3DS or Old3DS, from APT_CheckNew3DS at startup. Both the emulator
-   thread's core choice and the main thread's UI cadence depend on it - see
-   g_top_refresh_us below and the threadCreate call in main(). */
-static bool g_new_3ds = false;
 
 static void term_printf(const char *format, ...) {
   char buf[512];
@@ -38,10 +31,6 @@ static void term_printf(const char *format, ...) {
   }
 }
 
-// The touch keyboard lives on the bottom screen and comes from
-// vendor/ctr-osk-rt. All this file does is own one, hand it the terminal's
-// title bar, and push whatever bytes it produces into rx_buf below.
-static CtrOsk g_osk;
 
 
 // ---------------------------------------------------------
@@ -49,14 +38,13 @@ static CtrOsk g_osk;
 // ---------------------------------------------------------
 #include "default64mbdtc.h"
 
-uint32_t ram_amt = 64 * 1024 * 1024;
+uint32_t ram_amt = PLAT_RAM_MAX_MB * 1024u * 1024u;
 // Smallest amount of RAM left over after the kernel image that's worth
 // trying to boot on - see the size check in main().
-#define MIN_GUEST_FREE_RAM (8 * 1024 * 1024)
+#define MIN_GUEST_FREE_RAM (PLAT_RAM_MIN_MB * 1024u * 1024u)
 uint8_t *ram_image = 0;
 struct MiniRV32IMAState *core;
 
-#define TICKS_PER_US 268
 #define EMU_RUN_BUDGET_US 50000
 // Instructions per MiniRV32IMAStep call. This also sets the resolution of the
 // guest's clock (see the tick handling in EmuStepBatch), so it trades
@@ -68,29 +56,11 @@ struct MiniRV32IMAState *core;
 // SBI forwarding in HandleException. Left coarse deliberately.
 #define EMU_STEP_CHUNK 200000
 
-/* UI cadence, set once from g_new_3ds at startup.
-
-   These are the two things the main thread does forever: redraw the top
-   screen and poll input. On a New3DS neither matters - the emulator has
-   core 2 to itself, so the main thread can spend core 0 however it likes
-   and 30fps/60Hz is simply the nicest UI. On an Old 3DS there is no core 2
-   (see the threadCreate call in main), so the emulator lands on the system
-   core and this thread's every wakeup competes with guest execution for
-   real. Redrawing the terminal is the expensive half by a wide margin: it's
-   a per-cell software blit of an 80x30 grid into the 400x240 framebuffer,
-   on a 268MHz ARM11 with no speedup available (osSetSpeedupEnable is
-   New3DS-only), and it happens whether the guest is doing anything or not.
-
-   So the Old 3DS runs the same code at a coarser cadence - ~8fps redraw,
-   30Hz input - trading UI smoothness, which nobody watches while a kernel
-   compiles, for guest throughput, which is the whole point of the app.
-   Input stays well above the ~10Hz where a touch keyboard starts dropping
-   taps. This is why an Old 3DS is slower-but-working rather than an
-   unusable version of the same thing. */
-static uint32_t g_top_refresh_us  = 33000;      /* ~30fps */
-static uint32_t g_input_poll_ns   = 1000000000LL / 60;
-#define TOP_REFRESH_INTERVAL_US_O3DS 120000     /* ~8fps  */
-#define INPUT_POLL_NS_O3DS (1000000000LL / 30)
+/* How often the main thread redraws the terminal and polls input. The values
+   come from plat_ui_cadence() at startup, which is where the reasoning about
+   sharing a core with the emulator lives. */
+static uint32_t g_top_refresh_us;
+static uint32_t g_input_poll_us;
 // How often the guest console mirror on the SD card is actually committed.
 // See WriteUARTByte for why this is time-based rather than per-line.
 #define UART_LOG_FLUSH_INTERVAL_US 500000
@@ -106,51 +76,42 @@ int rx_head = 0, rx_tail = 0;
 // written only ever from the main thread and don't need this lock - see
 // the PresentTopScreen/WriteUARTByte call sites below for what actually
 // needs to be inside it.
-static LightLock ui_lock;
-
-// Serializes calls to HIDUSER_GetSoundVolume, the one HID IPC call issued
-// from both threads: virtio_input.h's vinput_sample_hw() (main thread) and
-// hw3ds.h's /mnt/3ds/hw/slider_volume handler (now on the emu thread, via
-// a guest read through the 9P passthrough). libctru's HID session handle
-// is a single global, and while Horizon IPC sessions are generally fine
-// with concurrent callers from different threads, there's no need to bet
-// on that when serializing this rare, cheap call costs nothing.
-static LightLock hid_ipc_lock;
+static plat_mutex_t ui_lock;
 
 static int IsKBHit() {
-  LightLock_Lock(&ui_lock);
+  plat_mutex_lock(&ui_lock);
   int r = rx_head != rx_tail;
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
   return r;
 }
 static int ReadKBByte() {
-  LightLock_Lock(&ui_lock);
+  plat_mutex_lock(&ui_lock);
   int result = -1;
   if (rx_head != rx_tail) {
     result = rx_buf[rx_tail];
     rx_tail = (rx_tail + 1) % 256;
   }
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
   return result;
 }
-static void rx_push(char c) {
-  LightLock_Lock(&ui_lock);
+void rx_push(char c) {
+  plat_mutex_lock(&ui_lock);
   int nh = (rx_head + 1) % 256;
   if (nh != rx_tail) { rx_buf[rx_head] = c; rx_head = nh; }
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
 }
-static void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
+void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
 
 static uint32_t uart_byte_count = 0;
-static FILE *uart_log_file = NULL; // sdmc:/3ds-cli-console.log mirror of guest console output
+static FILE *uart_log_file = NULL; // <SD>/3ds-cli-console.log mirror of guest console output
 static void WriteUARTByte(char c) {
   uart_byte_count++;
-  LightLock_Lock(&ui_lock);
+  plat_mutex_lock(&ui_lock);
   /* Gated, or scrollback is unreadable while the guest is printing: every
      byte would snap the viewport back. "Follow output", also bound to ZL. */
   if (g_cfg.follow_output) term_state.auto_track = true;
   term_write_char(&term_state, c);
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
   // File I/O below is safe unlocked: uart_log_file is only ever touched
   // from whichever single thread calls WriteUARTByte (the emu thread once
   // one exists), never concurrently from two threads.
@@ -166,8 +127,8 @@ static void WriteUARTByte(char c) {
     // so a clean shutdown loses nothing at all.
     if (c == '\n') {
       static uint64_t last_flush_tick = 0;
-      uint64_t now = svcGetSystemTick();
-      if (now - last_flush_tick >= (uint64_t)UART_LOG_FLUSH_INTERVAL_US * TICKS_PER_US) {
+      uint64_t now = plat_us();
+      if (now - last_flush_tick >= UART_LOG_FLUSH_INTERVAL_US) {
         fflush(uart_log_file);
         last_flush_tick = now;
       }
@@ -175,29 +136,27 @@ static void WriteUARTByte(char c) {
   }
 }
 
-static bool TimeSinceUs(uint64_t last_tick, uint64_t interval_us) {
-  return svcGetSystemTick() - last_tick >= interval_us * TICKS_PER_US;
+static bool TimeSinceUs(uint64_t last_us, uint64_t interval_us) {
+  return plat_us() - last_us >= interval_us;
 }
 
-static void PresentTopScreen(uint64_t *last_present_tick) {
-  u8 *top_fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+static void PresentTopScreen(uint64_t *last_present_us) {
+  plat_fb_t fb;
+  if (!plat_surface(PLAT_SURF_TERM, &fb)) return;
   // Locked only around the part that actually touches term_state/reads the
-  // grid the emu thread writes - gfxSwapBuffers/gspWaitForVBlank can block
-  // for a while waiting on vsync and must not hold this lock while doing
-  // so, or a burst of guest console output would stall behind a whole
-  // frame's wait for no reason.
-  LightLock_Lock(&ui_lock);
-  term_draw(&term_state, top_fb);
+  // grid the emu thread writes - plat_present blocks for vsync and must not
+  // hold this lock while doing so, or a burst of guest console output would
+  // stall behind a whole frame's wait for no reason.
+  plat_mutex_lock(&ui_lock);
+  term_draw(&term_state, &fb);
   term_state.dirty = false;
-  LightLock_Unlock(&ui_lock);
-  gfxFlushBuffers();
-  gfxSwapBuffers();
-  gspWaitForVBlank();
-  *last_present_tick = svcGetSystemTick();
+  plat_mutex_unlock(&ui_lock);
+  plat_present(PLAT_SURF_BIT(PLAT_SURF_TERM));
+  *last_present_us = plat_us();
 }
 
 static FILE *OpenDiskFile(const char **opened_path) {
-  static const char *paths[] = { "sdmc:/rootfs.ext2", "rootfs.ext2" };
+  static const char *paths[] = { PLAT_SD "rootfs.ext2", "rootfs.ext2" };
   for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
     FILE *f = fopen(paths[i], "r+b");
     if (f) {
@@ -246,8 +205,8 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
      filesystem that made it, with no way for the user to tell what had
      happened. A leftover .part is inert: nothing opens it, and the next
      attempt truncates it. */
-  static const char *kRootfsPath = "sdmc:/rootfs.ext2";
-  static const char *kRootfsPart = "sdmc:/rootfs.ext2.part";
+  static const char *kRootfsPath = PLAT_SD "rootfs.ext2";
+  static const char *kRootfsPart = PLAT_SD "rootfs.ext2.part";
   FILE *out = fopen(kRootfsPart, "wb");
   if (!out) { inflateEnd(&zs); return false; }
 
@@ -321,7 +280,7 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
    so whatever the filesystem leaves in the gap is never observed. Some SD
    filesystems don't extend a file that way, so the result is verified and
    falls back to an explicit (slow, one-time) zero-fill. */
-#define SWAP_PATH        "sdmc:/swap.img"
+#define SWAP_PATH        PLAT_SD "swap.img"
 #define SWAP_SIZE_BYTES  (64u * 1024u * 1024u)
 
 static FILE *CreateSwapFile(uint64_t *present_tick) {
@@ -383,6 +342,20 @@ static uint32_t HandleControlLoad(uint32_t addy);
 static void HandleOtherCSRWrite(uint8_t *image, uint16_t csrno, uint32_t value);
 static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 
+/* Guest memory is little-endian; the host may not be. See plat.h - these are
+   the identity on a little-endian console and compile to byte-reversed loads
+   and stores on a big-endian one. */
+#define MINIRV32_CUSTOM_MEMORY_BUS
+
+#define MINIRV32_STORE4(ofs, val) g_st32(image + (ofs), (uint32_t)(val))
+#define MINIRV32_STORE2(ofs, val) g_st16(image + (ofs), (uint16_t)(val))
+#define MINIRV32_STORE1(ofs, val) (*(uint8_t *)(image + (ofs)) = (uint8_t)(val))
+#define MINIRV32_LOAD4(ofs) g_ld32(image + (ofs))
+#define MINIRV32_LOAD2(ofs) g_ld16(image + (ofs))
+#define MINIRV32_LOAD1(ofs) (*(uint8_t *)(image + (ofs)))
+#define MINIRV32_LOAD2_SIGNED(ofs) ((int16_t)g_ld16(image + (ofs)))
+#define MINIRV32_LOAD1_SIGNED(ofs) (*(int8_t *)(image + (ofs)))
+
 #define MINIRV32WARN(x...) printf(x);
 #define MINIRV32_DECORATE static
 #define MINI_RV32_RAM_SIZE ram_amt
@@ -410,9 +383,9 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 static bool g_dev_net = true, g_dev_rng = true, g_dev_9p = true, g_dev_input = true;
 
 /* Included here rather than up with terminal.h: both reach into term_state,
-   ui_lock, g_osk, rx_push_str and the virtio devices above. */
+   ui_lock, the panel keyboard, rx_push_str and the virtio devices above. */
+#include "plat_kbd.h"
 #include "settings.h"
-#include "inputpane.h"
 
 // Written by the emu thread (HandleSBICall, on an SRST call), read by the
 // main thread's exit check below - volatile so the main thread's compiled
@@ -434,12 +407,12 @@ static volatile int sbi_shutdown_requested = 0;
 // two locked handoffs below (g_vinput_axes for sensor samples in, g_emu_ret
 // for exit-status out) plus the ui_lock-guarded rx_buf/term_state already
 // covered in WriteUARTByte/PresentTopScreen/rx_push et al.
+volatile bool g_emu_rebase_clock = false;       // backend -> emu thread: the process was suspended.
 static volatile bool g_emu_should_stop = false; // main thread -> emu thread: please stop.
 static volatile int  g_emu_ret = 0;             // emu thread -> main thread: last MiniRV32IMAStep result.
 
-// Written by the main thread (which owns hidScanInput() and everything
-// that depends on its cache - see vinput_sample_hw()'s comment in
-// virtio_input.h), read by the emu thread. Guarded by ui_lock even though
+// Written by the main thread (which owns plat_poll_input and everything
+// that depends on its cache - see plat_sample_axes), read by the emu thread. Guarded by ui_lock even though
 // it's a plain array with no pointers (so a torn read could at worst show
 // one axis a poll cycle stale, never anything unsafe) - the lock is cheap
 // and this makes that reasoning unnecessary to rely on.
@@ -453,13 +426,13 @@ static int32_t g_vinput_axes[VI_NAXES];
 //
 // dbg_log_file below writes a ring buffer of the last DBG_RING_N distinct
 // (pc,mcause) transitions plus a full register dump to
-// sdmc:/3ds-cli-debug.log whenever execution is detected as stuck (200
+// <SD>/3ds-cli-debug.log whenever execution is detected as stuck (200
 // consecutive chunks with zero forward progress), re-arming once forward
 // progress resumes. Cheap enough to leave enabled, and it has paid for
 // itself repeatedly when a guest-side hang needed diagnosing.
 static int EmuStepBatch(uint64_t *last_tick) {
   int ret = 0;
-  uint64_t now = svcGetSystemTick();
+  uint64_t now = plat_us();
   uint64_t frame_start = now;
   static uint32_t dbg_step = 0;
   static uint32_t dbg_last_pc = 0xffffffffu, dbg_last_mc = 0xffffffffu;
@@ -486,7 +459,7 @@ static int EmuStepBatch(uint64_t *last_tick) {
        of timer interrupts and an RCU stall splat; swallow the gap instead. */
     if (g_emu_rebase_clock) { g_emu_rebase_clock = false; *last_tick = now; }
 
-    uint32_t step_us = (uint32_t)((now - *last_tick) / TICKS_PER_US);
+    uint32_t step_us = (uint32_t)(now - *last_tick);
     *last_tick = now;
     ret = MiniRV32IMAStep(core, ram_image, 0, step_us, EMU_STEP_CHUNK);
     dbg_step++;
@@ -550,19 +523,19 @@ static int EmuStepBatch(uint64_t *last_tick) {
       fprintf(dbg_log_file, "=== END ===\n");
       fflush(dbg_log_file);
     }
-    now = svcGetSystemTick();
+    now = plat_us();
   } while (ret != 1 &&
            ret != 0x5555 &&
            ret != 3 &&
            !sbi_shutdown_requested &&
-           now - frame_start < (uint64_t)EMU_RUN_BUDGET_US * TICKS_PER_US);
+           now - frame_start < EMU_RUN_BUDGET_US);
 
   vnet_poll(ram_image);
 
   int32_t axes[VI_NAXES];
-  LightLock_Lock(&ui_lock);
+  plat_mutex_lock(&ui_lock);
   memcpy(axes, g_vinput_axes, sizeof(axes));
-  LightLock_Unlock(&ui_lock);
+  plat_mutex_unlock(&ui_lock);
   vinput_poll(ram_image, axes);
 
   return ret;
@@ -570,12 +543,12 @@ static int EmuStepBatch(uint64_t *last_tick) {
 
 static void EmuThreadEntry(void *arg) {
   (void)arg;
-  uint64_t last_tick = svcGetSystemTick();
+  uint64_t last_tick = plat_us();
   while (!g_emu_should_stop) {
     int ret = EmuStepBatch(&last_tick);
     g_emu_ret = ret;
     if (ret == 0x5555 || ret == 3 || sbi_shutdown_requested) break;
-    if (ret == 1) svcSleepThread(1000000LL);
+    if (ret == 1) plat_sleep_us(1000);
   }
 }
 
@@ -714,20 +687,10 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno) { return 0; }
 
 
 int main(int argc, char **argv) {
-  LightLock_Init(&ui_lock);
-  LightLock_Init(&hid_ipc_lock);
+  plat_mutex_init(&ui_lock);
 
-  gfxInitDefault();
-  /* New3DS-only: 804MHz instead of 268MHz, plus the L2 cache. A no-op that
-     simply fails on an Old 3DS, which is the single biggest reason that
-     model needs the cheaper UI cadence selected just below. */
-  osSetSpeedupEnable(true);
-
-  APT_CheckNew3DS(&g_new_3ds);
-  if (!g_new_3ds) {
-    g_top_refresh_us = TOP_REFRESH_INTERVAL_US_O3DS;
-    g_input_poll_ns  = INPUT_POLL_NS_O3DS;
-  }
+  if (!plat_init()) return -1;
+  plat_ui_cadence(&g_top_refresh_us, &g_input_poll_us);
 
   term_init(&term_state);
 
@@ -745,20 +708,16 @@ int main(int argc, char **argv) {
   g_dev_input = g_cfg.dev_sensors;
   g_dev_9p    = g_cfg.dev_sd || g_cfg.dev_nand || g_cfg.dev_twl;
 
-  // Bottom screen: the keyboard owns it outright, drawing into the raw
-  // framebuffer (no consoleInit). ctrOskInit is also what turns off double
-  // buffering down there, since it redraws in place and never swaps.
-  ctrOskInit(&g_osk);
-  g_osk.title    = "3ds-cli";
-  g_osk.subtitle = "adabit.org";
+  // The panel: the keyboard owns it outright, drawing into the raw
+  // framebuffer. Which keyboard that is, is the backend's choice.
+  pkbd_init();
 
   /* Pushes the loaded theme into the terminal palette and the keyboard, and
      applies font/zoom/cursor/follow. Safe this early: the emulation thread
      does not exist yet. */
   settings_apply_live();
 
-  if (g_cfg.keyboard == 0) ctrOskDraw(&g_osk);
-  else                     pane_draw();
+  pkbd_draw();
 
   term_printf("\x1b[2J");
   term_printf("Welcome to 3DS-CLI Linux Emulator\n");
@@ -775,30 +734,29 @@ int main(int argc, char **argv) {
     if (cap < ram_amt) ram_amt = cap;
   }
 
-  while (ram_amt >= 8 * 1024 * 1024) {
+  while (ram_amt >= PLAT_RAM_MIN_MB * 1024u * 1024u) {
     ram_image = malloc(ram_amt);
     if (ram_image) break;
     ram_amt -= 1024 * 1024;
   }
 
   if (!ram_image) {
-    term_printf("Failed to allocate at least 8MB for RAM.\n");
+    term_printf("Failed to allocate at least %dMB for RAM.\n", PLAT_RAM_MIN_MB);
     goto wait_exit;
   }
 
   /* Both halves of this line are the first thing worth knowing from a bug
      report: which model's limits apply, and how much RAM the guest actually
      got - issue #5 was diagnosed off exactly these numbers. */
-  term_printf("Model: %s (%s UI)\n", g_new_3ds ? "New3DS" : "Old3DS",
-              g_new_3ds ? "full" : "reduced");
+  term_printf("Model: %s\n", plat_model());
   term_printf("Allocated %lu bytes for RAM.\n", ram_amt);
 
   /* Open kernel Image (possibly a combined kernel+rootfs bundle) */
-  FILE *f = fopen("sdmc:/Image", "rb");
+  FILE *f = fopen(PLAT_SD "Image", "rb");
   if (!f) f = fopen("Image", "rb");
   if (!f) {
-    term_printf("Error: Could not open 'sdmc:/Image'.\n");
-    term_printf("Please copy Image to sdmc:/\n");
+    term_printf("Error: Could not open '" PLAT_SD "Image'.\n");
+    term_printf("Please copy Image to " PLAT_SD "\n");
     goto wait_exit;
   }
 
@@ -820,7 +778,7 @@ int main(int argc, char **argv) {
     g_cfg.reset_rootfs = false;
     cfg_save(&g_cfg);
     if (have_bundle) {
-      remove("sdmc:/rootfs.ext2");
+      remove(PLAT_SD "rootfs.ext2");
       term_printf("Resetting guest state: rootfs will be re-extracted.\n");
     } else {
       /* The row is unreachable without a bundle, but a hand-edited config
@@ -839,7 +797,7 @@ int main(int argc, char **argv) {
   }
   if (!disk_file) {
     term_printf("Error: Could not open rootfs.ext2.\n");
-    term_printf("Please copy rootfs.ext2 to sdmc:/\n");
+    term_printf("Please copy rootfs.ext2 to " PLAT_SD "\n");
     fclose(f);
     goto wait_exit;
   }
@@ -887,11 +845,21 @@ int main(int argc, char **argv) {
      permissions; without them they're simply absent and the guest's
      mount of them fails rather than the whole device disappearing. */
   if (g_dev_9p) {
-    v9p_init(g_cfg.dev_sd, g_cfg.dev_nand, g_cfg.dev_twl);
-    term_printf("Passthrough: hw%s%s%s\n",
-                v9p_tree_ok[V9P_TREE_SD]   ? " sd"   : "",
-                v9p_tree_ok[V9P_TREE_NAND] ? " nand" : "",
-                v9p_tree_ok[V9P_TREE_TWL]  ? " twl"  : "");
+    const plat_tree_t *pt;
+    int npt = plat_v9p_trees(&pt);
+    uint32_t want = 0;
+    for (int i = 0; i < npt; i++)
+      if (cfg_tree_wanted(&g_cfg, pt[i].aname)) want |= 1u << i;
+    v9p_init(want);
+
+    /* Named rather than positional: which trees a console has is its own
+       business, and a bug report wants to see the ones that actually came up. */
+    char list[96];
+    int  ln = snprintf(list, sizeof(list), "hw");
+    for (int i = 0; i < npt && ln < (int)sizeof(list); i++)
+      if (v9p_tree_ok[i])
+        ln += snprintf(list + ln, sizeof(list) - ln, " %s", pt[i].aname);
+    term_printf("Passthrough: %s\n", list);
   } else {
     /* Every tree off takes the whole device with it, including the synthetic
        hw/ tree - there is only one virtio-9p channel. */
@@ -900,8 +868,8 @@ int main(int argc, char **argv) {
 
   if (g_dev_input) {
     vinput_init();
-    term_printf("Sensors: %s\n", hw.sensors ? "ok (accel, gyro, sliders)"
-                                            : "unavailable");
+    term_printf("Sensors: %s\n", plat_caps()->sensors ? "ok (accel, gyro, sliders)"
+                                                      : "unavailable");
   } else {
     term_printf("Sensors: disabled\n");
   }
@@ -915,9 +883,15 @@ int main(int argc, char **argv) {
      actual entry code 4MB away from where pc gets set, so the CPU starts
      executing whatever unrelated bytes happen to be at the front of the
      file instead - which decodes as an immediate illegal instruction. */
+  /* The header's fields are little-endian on every host, so they are decoded
+     byte by byte rather than read straight into a native integer. */
   uint64_t image_load_offset = 0, image_size = 0;
+  uint8_t hdr[16];
   fseek(f, 8, SEEK_SET);
-  if (fread(&image_load_offset, sizeof(image_load_offset), 1, f) != 1) image_load_offset = 0;
+  if (fread(hdr, sizeof(hdr), 1, f) == 1) {
+    for (int i = 7; i >= 0; i--) image_load_offset = (image_load_offset << 8) | hdr[i];
+    for (int i = 7; i >= 0; i--) image_size        = (image_size << 8) | hdr[8 + i];
+  }
   /* image_size (the next 8-byte LE field) is what the kernel will actually
      occupy once running - _end minus _start, so it counts BSS, which isn't
      in the file at all. Checking the file length instead under-counts, and
@@ -925,7 +899,6 @@ int main(int argc, char **argv) {
      zeroes its BSS over whatever follows. Fall back to the file length if
      the field is absent or nonsense (a 0 image_size is what pre-4.15
      RV32 kernels wrote). */
-  if (fread(&image_size, sizeof(image_size), 1, f) != 1) image_size = 0;
   if (image_size < (uint64_t)flen) image_size = (uint64_t)flen;
   fseek(f, 0, SEEK_SET);
 
@@ -937,7 +910,8 @@ int main(int argc, char **argv) {
      free it either panics during boot or OOM-kills init the moment it gets
      one. */
   uint32_t kernel_top = (uint32_t)(image_load_offset + image_size);
-  uint32_t reserved_top = sizeof(default64mbdtb) + sizeof(struct MiniRV32IMAState);
+  /* Slack for the alignment the DTB and the CPU state are rounded down to. */
+  uint32_t reserved_top = sizeof(default64mbdtb) + sizeof(struct MiniRV32IMAState) + 128;
   if ((uint64_t)kernel_top + reserved_top + MIN_GUEST_FREE_RAM > (uint64_t)ram_amt) {
     term_printf("Image too large for RAM.\n");
     term_printf("  kernel wants %luMB at +%luMB, RAM is %luMB.\n",
@@ -964,17 +938,27 @@ int main(int argc, char **argv) {
        silently skips the entire device-tree scan, including memory
        detection. sizeof(default64mbdtb)/sizeof(struct MiniRV32IMAState)
        aren't multiples of 8, so this must be rounded down explicitly. */
-    uint32_t dtb_ptr = (ram_amt - sizeof(default64mbdtb) - sizeof(struct MiniRV32IMAState)) & ~7u;
+    /* The emulator's own CPU state is a host structure that happens to live in
+       the guest's allocation, so it has to satisfy the host's alignment, not
+       the guest's: on a console that cares, an unaligned struct turns the
+       TLB flush's memset into a fault. 64 bytes covers the widest alignment
+       any of these architectures asks for. */
+    uint32_t core_off = (ram_amt - sizeof(struct MiniRV32IMAState)) & ~63u;
+    uint32_t dtb_ptr  = (core_off - sizeof(default64mbdtb)) & ~7u;
     memcpy(ram_image + dtb_ptr, default64mbdtb, sizeof(default64mbdtb));
 
-    /* Patch the RAM-size word in the DTB's memory node with the actual usable size.
-       dtb_ptr (as big-endian) is the number of bytes Linux may use before the DTB. */
-    uint32_t *dtb = (uint32_t *)(ram_image + dtb_ptr);
-    uint32_t *patch = (uint32_t *)((uint8_t *)dtb + DTB_MEM_SIZE_OFFSET);
+    /* Patch the RAM-size word in the DTB's memory node with the actual usable
+       size. dtb_ptr is the number of bytes Linux may use before the DTB.
+       Device tree cells are big-endian by specification, whatever the host is,
+       so the four bytes are written explicitly. */
+    uint8_t *patch = ram_image + dtb_ptr + DTB_MEM_SIZE_OFFSET;
     uint32_t vr = dtb_ptr;
-    *patch = (vr>>24)|((vr>>16&0xff)<<8)|((vr>>8&0xff)<<16)|((vr&0xff)<<24);
+    patch[0] = (uint8_t)(vr >> 24);
+    patch[1] = (uint8_t)(vr >> 16);
+    patch[2] = (uint8_t)(vr >> 8);
+    patch[3] = (uint8_t)vr;
 
-    core = (struct MiniRV32IMAState *)(ram_image + ram_amt - sizeof(struct MiniRV32IMAState));
+    core = (struct MiniRV32IMAState *)(ram_image + core_off);
     core->pc = MINIRV32_RAM_IMAGE_OFFSET + (uint32_t)image_load_offset;
     core->regs[10] = 0x00; // hartid
     core->regs[11] = dtb_ptr ? (dtb_ptr + MINIRV32_RAM_IMAGE_OFFSET) : 0; // dtb pointer
@@ -1004,9 +988,11 @@ int main(int argc, char **argv) {
     core->mie = (1u<<7); // MTIE
   }
 
-  dbg_log_file = fopen("sdmc:/3ds-cli-debug.log", "w");
+  dbg_log_file = fopen(PLAT_SD "3ds-cli-debug.log", "w");
+
   if (!dbg_log_file) dbg_log_file = fopen("3ds-cli-debug.log", "w");
-  uart_log_file = fopen("sdmc:/3ds-cli-console.log", "w");
+  uart_log_file = fopen(PLAT_SD "3ds-cli-console.log", "w");
+
   if (dbg_log_file) {
     fprintf(dbg_log_file, "[host] vnet soc_ready=%d\n", (int)vnet.soc_ready);
     fflush(dbg_log_file);
@@ -1016,79 +1002,43 @@ int main(int argc, char **argv) {
   term_state.dirty = true;
   PresentTopScreen(&last_present_tick);
 
-  // Give the emulator its own physical core so it can run flat-out
-  // concurrently with input/rendering instead of time-slicing a single
-  // core with them. Prefer New3DS's extra core (id 2) - it's a dedicated
-  // spare application core, unlike core 1 (the system core, shared with
-  // Home Menu and other background OS tasks). Both are opportunistic:
-  // core 2 needs exheader kernel-flag permissions that belong to whatever
-  // hosts this .3dsx (the Homebrew Launcher, when run that way - not
-  // something this app's own build controls), and core 1 needs
-  // APT_SetAppCpuTimeLimit to succeed. Try core 2 first, fall back to
-  // core 1, and if neither works, fall back further to just not creating
-  // the thread at all - see below.
-  //
-  // Core 2 is only *asked* for on a console that has one. An Old 3DS has
-  // cores 0 and 1 and nothing else, and while its kernel does just fail the
-  // svcCreateThread (leaving the fallback below to do its job), asking at
-  // all means handing an out-of-range processor id to whatever is running
-  // this - Azahar in Old 3DS mode aborts on an assertion rather than
-  // returning an error, which is how this surfaced.
-#define EMU_THREAD_STACK_SIZE (32 * 1024)
-  s32 main_thread_prio = 0x30;
-  svcGetThreadPriority(&main_thread_prio, CUR_THREAD_HANDLE);
-  Thread emu_thread = NULL;
-  const char *emu_core_desc = "New3DS core 2";
-  if (g_new_3ds)
-    emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 2, false);
-  if (!emu_thread) {
-    if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))) {
-      emu_thread = threadCreate(EmuThreadEntry, NULL, EMU_THREAD_STACK_SIZE, main_thread_prio - 1, 1, false);
-      emu_core_desc = "system core";
-    }
-  }
+  // Give the emulator its own core so it can run flat-out concurrently with
+  // input and rendering. Which core, and whether the console has a spare at
+  // all, is the backend's call - see plat_thread_start. A single-core console
+  // returns false, and the emulator is then stepped inline from the loop
+  // below against the same wall-clock budget: slower, because every redraw and
+  // input poll comes straight out of guest execution time, but the only shape
+  // available when there is nowhere else to run.
+  bool emu_thread = plat_caps()->emu_thread && plat_thread_start(EmuThreadEntry, NULL);
+  uint64_t inline_tick = plat_us();
   if (emu_thread) {
-    term_printf("Emulator thread: %s\n", emu_core_desc);
+    term_printf("Emulator thread: %s\n", plat_thread_desc());
   } else {
-    // Extremely unlikely (APT_SetAppCpuTimeLimit is a basic, always-
-    // available call) - if it still happens, there's no thread to run the
-    // emulator on at all. Say so and let the user read it and quit
-    // themselves rather than silently doing nothing then vanishing.
-    term_printf("Could not start emulator thread (core 1 or 2 both unavailable).\n");
-    term_state.dirty = true;
-    PresentTopScreen(&last_present_tick);
-    while (aptMainLoop()) {
-      hidScanInput();
-      if (hidKeysDown() & KEY_START) break;
-      svcSleepThread(1000000000LL / 30); // ns - see the main input loop below.
-    }
+    term_printf("Emulator: inline (no spare core)\n");
   }
   term_state.dirty = true;
   PresentTopScreen(&last_present_tick);
 
-  while (emu_thread && aptMainLoop()) {
+  while (plat_running()) {
 
-    hidScanInput();
-    u32 kDown = hidKeysDown();
-    if (kDown & KEY_START) break;
 
-    touchPosition touch;
-    hidTouchRead(&touch);
-    bool tapped = (kDown & KEY_TOUCH) != 0;
+    plat_input_t in;
+    plat_poll_input(&in);
+    uint32_t kDown = in.down;
+    if (kDown & PLAT_BTN_QUIT) break;
 
     // Sample motion/slider hardware for the virtio-input device and hand
-    // it off to the emu thread. Sampling itself must stay on this thread -
-    // see vinput_sample_hw()'s comment in virtio_input.h - piggybacking on
-    // the hidScanInput() just above costs a handful of comparisons per
-    // frame and naturally rate-limits to the console's own refresh.
-    // Skipped when the sensor device is off: nothing would read the result,
-    // and hw3ds_init may never have run.
+    // it off to the emu thread. Sampling must stay on this thread: the
+    // backend reads whatever the console's input poll last cached, and this
+    // is the thread that polls. Piggybacking on that poll costs a handful of
+    // comparisons per frame and rate-limits naturally to the refresh.
+    // Skipped when the sensor device is off - nothing would read the result.
     if (g_dev_input) {
       int32_t axes[VI_NAXES];
-      vinput_sample_hw(axes);
-      LightLock_Lock(&ui_lock);
+      plat_sample_axes(axes);
+      plat_mutex_lock(&ui_lock);
       memcpy(g_vinput_axes, axes, sizeof(axes));
-      LightLock_Unlock(&ui_lock);
+      plat_mutex_unlock(&ui_lock);
     }
 
     /* Above the settings block on purpose: this is the only thing that marks
@@ -1100,7 +1050,7 @@ int main(int argc, char **argv) {
        3DS comes out of guest execution time (see g_top_refresh_us). */
     if (term_state.cursor_blink) {
       static bool last_blink_on = false;
-      bool blink_on = (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
+      bool blink_on = term_blink_on();
       if (blink_on != last_blink_on) {
         term_state.dirty = true;
         last_blink_on = blink_on;
@@ -1108,16 +1058,16 @@ int main(int argc, char **argv) {
     }
 
     /* The settings page takes the whole bottom screen and every button but
-       START: ctrOskDraw clears all 320x240, so the page and the keyboard
-       cannot share the screen. */
+       START: the keyboard's draw clears the whole panel, so the page and the
+       keyboard cannot share it. */
     if (settings_open) {
-      if (!settings_update(kDown, &touch, tapped)) settings_leave();
+      if (!settings_update(&in)) settings_leave();
       if (settings_quit) { settings_quit = false; break; }
       if (settings_open) settings_draw();
       goto after_input;
     }
 
-    if (kDown & KEY_SELECT) {
+    if (kDown & PLAT_BTN_SETTINGS) {
       settings_enter();
       settings_draw();
       goto after_input;
@@ -1127,45 +1077,45 @@ int main(int argc, char **argv) {
     /* These shortcuts and their settings rows are the same controls, so each
        writes g_cfg as well as term_state - otherwise the page opens showing
        stale values and the next save undoes what the buttons did. */
-    if (kDown & KEY_L || kDown & KEY_Y) {
+    if (kDown & PLAT_BTN_ZOOM_OUT) {
       int z = (term_state.zoom_x > 1) ? term_state.zoom_x - 1 : 1;
       term_state.zoom_x = g_cfg.zoom_x = z;
       term_state.zoom_y = g_cfg.zoom_y = z;
       term_state.dirty = true;
     }
-    if (kDown & KEY_R || kDown & KEY_X) {
+    if (kDown & PLAT_BTN_ZOOM_IN) {
       int z = (term_state.zoom_x < 5) ? term_state.zoom_x + 1 : 5;
       term_state.zoom_x = g_cfg.zoom_x = z;
       term_state.zoom_y = g_cfg.zoom_y = z;
       term_state.dirty = true;
     }
-    if (kDown & KEY_ZL) {
+    if (kDown & PLAT_BTN_FOLLOW) {
       g_cfg.follow_output = !g_cfg.follow_output;
       term_state.auto_track = g_cfg.follow_output;
       if (term_state.auto_track) term_state.scroll_y = 0; // snap back to live
       term_state.dirty = true;
     }
-    if (kDown & KEY_ZR) {
+    if (kDown & PLAT_BTN_FONT) {
       g_cfg.use_5x7 = !g_cfg.use_5x7;
       term_state.use_5x7 = g_cfg.use_5x7;
       term_state.dirty = true;
     }
 
-    // Viewport panning with Circle Pad
+    // Viewport panning with the analog stick. The deadzone is the backend's
+    // (it knows its own hardware's slop), so a nonzero axis here means
+    // deflected.
     static int pan_cooldown_x = 0;
     static int pan_cooldown_y = 0;
-    circlePosition cpos;
-    hidCircleRead(&cpos);
 
     if (g_cfg.circle_pans) {
-      if (abs(cpos.dx) > 40) {
+      if (in.pan_x) {
         /* Turns follow-output off, not just auto_track: WriteUARTByte sets
            auto_track back on at the very next byte from the guest. */
         g_cfg.follow_output = false;
         term_state.auto_track = false;
         if (pan_cooldown_x <= 0) {
-          if (cpos.dx > 40) term_state.scroll_x++;
-          else if (cpos.dx < -40) term_state.scroll_x--;
+          if (in.pan_x > 0) term_state.scroll_x++;
+          else              term_state.scroll_x--;
           pan_cooldown_x = 4;
           term_state.dirty = true;
         } else {
@@ -1175,12 +1125,12 @@ int main(int argc, char **argv) {
         pan_cooldown_x = 0;
       }
 
-      if (abs(cpos.dy) > 40) {
+      if (in.pan_y) {
         g_cfg.follow_output = false;
         term_state.auto_track = false;
         if (pan_cooldown_y <= 0) {
-          if (cpos.dy > 40) term_state.scroll_y--;
-          else if (cpos.dy < -40) term_state.scroll_y++;
+          if (in.pan_y > 0) term_state.scroll_y--;
+          else              term_state.scroll_y++;
           pan_cooldown_y = 4;
           term_state.dirty = true;
         } else {
@@ -1190,46 +1140,31 @@ int main(int argc, char **argv) {
         pan_cooldown_y = 0;
       }
     } else {
-      /* Arrow-key mode: same deadzone and cooldown, so a held stick repeats
-         rather than flooding the ring. */
-      if (abs(cpos.dx) > 40) {
+      /* Arrow-key mode: same cooldown, so a held stick repeats rather than
+         flooding the ring. */
+      if (in.pan_x) {
         if (pan_cooldown_x <= 0) {
-          rx_push_str(cpos.dx > 0 ? "\x1b[C" : "\x1b[D");
+          rx_push_str(in.pan_x > 0 ? "\x1b[C" : "\x1b[D");
           pan_cooldown_x = 4;
         } else pan_cooldown_x--;
       } else pan_cooldown_x = 0;
 
-      if (abs(cpos.dy) > 40) {
+      if (in.pan_y) {
         if (pan_cooldown_y <= 0) {
-          rx_push_str(cpos.dy > 0 ? "\x1b[A" : "\x1b[B");
+          rx_push_str(in.pan_y > 0 ? "\x1b[A" : "\x1b[B");
           pan_cooldown_y = 4;
         } else pan_cooldown_y--;
       } else pan_cooldown_y = 0;
     }
 
     // D-pad arrows
-    if (kDown & KEY_DUP)    rx_push_str("\x1b[A");
-    if (kDown & KEY_DDOWN)  rx_push_str("\x1b[B");
-    if (kDown & KEY_DRIGHT) rx_push_str("\x1b[C");
-    if (kDown & KEY_DLEFT)  rx_push_str("\x1b[D");
+    if (kDown & PLAT_BTN_UP)    rx_push_str("\x1b[A");
+    if (kDown & PLAT_BTN_DOWN)  rx_push_str("\x1b[B");
+    if (kDown & PLAT_BTN_RIGHT) rx_push_str("\x1b[C");
+    if (kDown & PLAT_BTN_LEFT)  rx_push_str("\x1b[D");
 
-    /* Both modes are dirty-tracked and only repaint when something changed:
-       a full bottom-screen repaint is not free on an Old 3DS. */
-    if (g_cfg.keyboard == 0) {
-      // The realtime keyboard does its own edge detection off the touch state
-      // hidScanInput just sampled, so the only thing left here is to forward
-      // the byte to the guest.
-      CtrOskEvent ev;
-      if (ctrOskUpdate(&g_osk, &ev)) rx_push((char)ev.byte);
-      ctrOskDraw(&g_osk);
-    } else {
-      /* Line-compose mode. pane_prompt suspends this process for as long as
-         the applet is up - see the clock re-basing it arranges on the way
-         out. */
-      if (kDown & KEY_A) pane_prompt();
-      else if (tapped)   pane_touch(&touch);
-      pane_draw();
-    }
+    pkbd_update(&in);
+    pkbd_draw();
 
 after_input:
     // Emulation itself now runs continuously on its own thread (see
@@ -1237,6 +1172,13 @@ after_input:
     // in this function) instead of being stepped from here in batches.
     // This thread's only remaining jobs are input, rendering, and noticing
     // when the emu thread reports the guest shut down or faulted.
+    if (!emu_thread) {
+      int ret = EmuStepBatch(&inline_tick);
+      g_emu_ret = ret;
+      /* WFI: the guest asked to idle, so stop burning the budget on it. */
+      if (ret == 1) plat_sleep_us(1000);
+    }
+
     int emu_ret = g_emu_ret;
     if (emu_ret == 0x5555 || emu_ret == 3 || sbi_shutdown_requested) {
       if (emu_ret == 3) term_printf("Emulator fault!\n");
@@ -1254,15 +1196,8 @@ after_input:
     // Nothing CPU-heavy left to do on this thread each iteration now that
     // emulation runs elsewhere - yield briefly instead of spinning flat
     // out just to poll input/vblank state. ~60Hz is plenty for a touch UI
-    // (30Hz on an Old 3DS - see g_input_poll_ns).
-    //
-    // svcSleepThread takes NANOseconds. This was 1000000LL/60, i.e. 16.7us,
-    // which polled input roughly a thousand times more often than the 60Hz
-    // intended just above - a whole core spinning on hidScanInput(). On a
-    // New3DS that core is otherwise idle so it merely wastes power, but on an
-    // Old 3DS this thread shares the system core with the emulator and every
-    // one of those wakeups came straight out of guest execution time.
-    svcSleepThread(g_input_poll_ns);
+    // (coarser where the emulator shares this core - see plat_ui_cadence).
+    plat_sleep_us(g_input_poll_us);
   }
 
   // Stop and join the emu thread before touching anything it owns
@@ -1272,8 +1207,7 @@ after_input:
   // using those same pointers/handles.
   if (emu_thread) {
     g_emu_should_stop = true;
-    threadJoin(emu_thread, U64_MAX);
-    threadFree(emu_thread);
+    plat_thread_join();
   }
 
   /* Explicit, now that the console mirror is no longer flushed on every
@@ -1286,27 +1220,27 @@ after_input:
   /* v9p_exit unmounts archives and tears down hw3ds, neither of which exists
      if v9p_init never ran. */
   if (g_dev_9p) v9p_exit();
-  if (vnet.soc_ready) socExit();
-  if (vrng.ps_ready) psExit();
+  if (vnet.soc_ready) plat_net_exit();
 
   /* The page saves on close too, but the button shortcuts (zoom, ZL, ZR,
      panning) change g_cfg without ever opening it. */
   cfg_save(&g_cfg);
 
   free(ram_image);
-  gfxExit();
+  plat_exit();
   return 0;
 
 wait_exit:
-  while (aptMainLoop()) {
-    hidScanInput();
-    if (hidKeysDown() & KEY_START) break;
-    u8 *top_fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    term_draw(&term_state, top_fb);
-    gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
+  while (plat_running()) {
+    plat_input_t in;
+    plat_poll_input(&in);
+    if (in.down & PLAT_BTN_QUIT) break;
+    plat_fb_t fb;
+    if (plat_surface(PLAT_SURF_TERM, &fb)) term_draw(&term_state, &fb);
+    plat_present(PLAT_SURF_BIT(PLAT_SURF_TERM));
   }
   CloseSwapFile();
   free(ram_image);
-  gfxExit();
+  plat_exit();
   return -1;
 }

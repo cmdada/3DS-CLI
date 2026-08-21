@@ -1,13 +1,13 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
-#include <3ds.h>
+#include "plat.h"
 
 /*
  * Virtio-mmio entropy (RNG) device.
  *
  * Wires the RISC-V guest's virtio_rng driver to the 3DS's real hardware
- * random number generator (PS_GenerateRandomBytes, via the "ps" service),
+ * random number generator where the console has one (plat_random),
  * so /dev/hwrng and early boot entropy come from real hardware instead of
  * the kernel's own (unseeded, NOMMU-limited) entropy pool.
  *
@@ -35,7 +35,7 @@ static struct {
 static void vrng_init(void) {
     memset(&vrng, 0, sizeof(vrng));
     vrng.queue_num = VQUEUE_SIZE;
-    vrng.ps_ready = R_SUCCEEDED(psInit());
+    vrng.ps_ready = plat_caps()->rng;
 }
 
 static void vrng_process_queue(uint8_t *ram) {
@@ -47,12 +47,12 @@ static void vrng_process_queue(uint8_t *ram) {
     if (!desc_table || !avail_ring || !used_ring) return;
 
     uint16_t avail_idx;
-    memcpy(&avail_idx, avail_ring + 2, 2);
+    avail_idx = g_ld16(avail_ring + 2);
 
     while (vrng.last_avail_idx != avail_idx) {
         uint16_t ring_pos = vrng.last_avail_idx % VQUEUE_SIZE;
         uint16_t head;
-        memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        head = g_ld16(avail_ring + 4u + ring_pos * 2u);
         vrng.last_avail_idx++;
 
         uint64_t a; uint32_t l; uint16_t f, nx;
@@ -60,24 +60,23 @@ static void vrng_process_queue(uint8_t *ram) {
         uint8_t *buf = guest_ptr(ram, (uint32_t)a, l);
         uint32_t filled = 0;
         if (buf && l) {
-            if (vrng.ps_ready && R_SUCCEEDED(PS_GenerateRandomBytes(buf, l))) {
-                filled = l;
-            } else {
-                /* Fallback: never leave the guest hanging even if ps fails */
-                for (uint32_t i = 0; i < l; i++) buf[i] = (uint8_t)svcGetSystemTick();
-                filled = l;
+            if (!plat_random(buf, l)) {
+                /* Never leave the guest hanging: a console with no CSPRNG, or
+                   one whose service failed, still gets bytes. */
+                for (uint32_t i = 0; i < l; i++) buf[i] = (uint8_t)plat_us();
             }
+            filled = l;
         }
 
         uint16_t used_idx_val;
-        memcpy(&used_idx_val, used_ring + 2, 2);
+        used_idx_val = g_ld16(used_ring + 2);
         uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
         uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
         uint32_t hd32 = head;
-        memcpy(ue + 0, &hd32, 4);
-        memcpy(ue + 4, &filled, 4);
+        g_st32(ue + 0, hd32);
+        g_st32(ue + 4, filled);
         used_idx_val++;
-        memcpy(used_ring + 2, &used_idx_val, 2);
+        g_st16(used_ring + 2, used_idx_val);
 
         vrng.int_status |= 1u;
     }

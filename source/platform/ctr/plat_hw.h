@@ -5,6 +5,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <3ds.h>
+#include "plat_cfg.h"
 
 /*
  * 3DS hardware accessors backing the synthetic `hw` tree of the virtio-9p
@@ -167,9 +168,9 @@ static int hw_rd_slider_3d(char *b, int n) {
 
 static int hw_rd_slider_volume(char *b, int n) {
     u8 vol = 0;
-    LightLock_Lock(&hid_ipc_lock);
+    LightLock_Lock(&hw_ipc_lock);
     Result r = HIDUSER_GetSoundVolume(&vol);
-    LightLock_Unlock(&hid_ipc_lock);
+    LightLock_Unlock(&hw_ipc_lock);
     if (R_SUCCEEDED(r))
         return snprintf(b, n, "%u\n", vol);
     if (hw.mcu && R_SUCCEEDED(MCUHWC_GetSoundSliderLevel(&vol)))
@@ -218,6 +219,13 @@ static int hw_rd_firmware(char *b, int n) {
     if (R_SUCCEEDED(osGetSystemVersionDataString(&nver, &cver, s, sizeof(s))))
         return snprintf(b, n, "%s\n", s);
     return snprintf(b, n, "unknown\n");
+}
+
+/* What the guest should set its TTY to. The grid is a property of this
+   console's screen, and the rootfs is shared across every console, so the
+   size has to travel as data rather than being baked into the image. */
+static int hw_rd_console_size(char *b, int n) {
+    return snprintf(b, n, "%d %d\n", TERM_COLS, TERM_ROWS);
 }
 
 static int hw_rd_info(char *b, int n) {

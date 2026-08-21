@@ -1,14 +1,14 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-/* Persistent settings, at sdmc:/3ds-cli.cfg.
+/* Persistent settings, at <SD>/3ds-cli.cfg.
 
    Plain `key=value` text, so a setting that makes the app unusable can be
    fixed by hand rather than only through the broken UI. Every field is
    declared once, in cfg_fields[] below; load, save and the settings page all
    drive off that table. */
 
-#include <3ds.h>
+#include "plat.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +17,7 @@
 
 #include "theme.h"
 
-#define CFG_PATH "sdmc:/3ds-cli.cfg"
+#define CFG_PATH PLAT_SD "3ds-cli.cfg"
 
 typedef struct {
   /* Display. Applied live; safe to change while the guest runs. */
@@ -38,7 +38,7 @@ typedef struct {
      mid-session does nothing until the next launch: a virtio device vanishing
      under a driver that has bound to it is a guest hang. */
   bool dev_net, dev_sd, dev_nand, dev_twl, dev_sensors, dev_rng, dev_swap;
-  int  ram_cap_mb;     /* 0 = auto (walk malloc down from 64MB)             */
+  int  ram_cap_mb;     /* 0 = auto (walk malloc down from PLAT_RAM_MAX_MB)  */
 
   /* Set by the settings page, consumed and cleared by the next boot: the page
      cannot unlink rootfs.ext2 while the emulator thread has it open. */
@@ -77,7 +77,7 @@ static const CfgField cfg_fields[] = {
   CFG_F(dev_sensors,   CFG_BOOL, 0, 1),
   CFG_F(dev_rng,       CFG_BOOL, 0, 1),
   CFG_F(dev_swap,      CFG_BOOL, 0, 1),
-  CFG_F(ram_cap_mb,    CFG_INT,  0, 64),
+  CFG_F(ram_cap_mb,    CFG_INT,  0, PLAT_RAM_MAX_MB),
 
   CFG_F(reset_rootfs,  CFG_BOOL, 0, 1),
 };
@@ -104,12 +104,14 @@ static inline void cfg_defaults(Cfg *c) {
   c->follow_output = true;    /* WriteUARTByte used to force this on always */
 
   c->keyboard      = 0;       /* ctr-osk-rt                                 */
-  c->backspace_del = true;    /* ctrOskInit's default: terminals want DEL   */
-  c->shift_oneshot = true;    /* ctrOskInit's default                       */
+  c->backspace_del = true;    /* terminals want DEL, not BS                 */
+  c->shift_oneshot = true;                                                     
   c->circle_pans   = true;
 
   c->dev_net = c->dev_sd = c->dev_nand = c->dev_twl = true;
-  c->dev_sensors = c->dev_rng = c->dev_swap = true;
+  c->dev_sensors = c->dev_rng = true;
+  /* Consoles with room for a real guest RAM allocation have no use for swap. */
+  c->dev_swap    = PLAT_WANT_SWAP;
   c->ram_cap_mb    = 0;       /* auto                                       */
 
   c->reset_rootfs  = false;
@@ -177,6 +179,17 @@ static inline bool cfg_save(const Cfg *c) {
   }
   fclose(f);
   return true;
+}
+
+/* The three passthrough flags are named for the 3DS's trees, since the config
+   file and the guest image are shared across every console. A console that
+   exports something else (the Wii's USB storage) rides on dev_sd: the flag
+   means "the removable storage trees", and splitting it would mean a config
+   key the 3DS never writes. */
+static inline bool cfg_tree_wanted(const Cfg *c, const char *aname) {
+  if (!strcmp(aname, "nand")) return c->dev_nand;
+  if (!strcmp(aname, "twl"))  return c->dev_twl;
+  return c->dev_sd;
 }
 
 #endif /* CONFIG_H */

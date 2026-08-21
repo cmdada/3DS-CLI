@@ -1,74 +1,73 @@
-#ifndef UI3DS_H
-#define UI3DS_H
+#ifndef CORE_UI_H
+#define CORE_UI_H
 
-/* Bottom-screen drawing, in the panorama_3ds house style, straight against the
- * raw framebuffer - there is no C3D/C2D context in this app.
+/* Panel drawing, in the panorama_3ds house style, straight against the raw
+ * framebuffer - there is no C3D/C2D context in this app.
  *
- * The bottom screen is 320x240 BGR8 and rotated, so screen pixel (x, y) lives
- * at byte offset (x * 240 + (239 - y)) * 3 - the same formula terminal.h uses
- * for the top screen. So a *vertical* span at fixed x is contiguous in memory
- * and a horizontal one is not, which is why ui_fill iterates columns on the
- * outside and writes each one as a single run.
+ * Every primitive is built from ui_vspan, a vertical run at fixed x. That is
+ * the shape the 3DS's rotated framebuffer is laid out for, where a column is
+ * contiguous and a row is not; on a console with a linear surface the two
+ * simply swap and the run is strided instead. The panel is dirty-tracked and
+ * repaints rarely, so that costs little and keeps one set of primitives.
  *
- * The bottom screen is also single-buffered - ctrOskInit turns double
- * buffering off (ctrosk.c) and never swaps. Draw in place; never call
- * gfxSwapBuffers for GFX_BOTTOM.
+ * Where the panel sits on the physical screen, and whether it needs flipping
+ * at all, is the backend's business - see plat_surface/plat_present.
  */
 
-#include <3ds.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdbool.h>
 
+#include "plat.h"
 #include "font.h"
 #include "theme.h"
 
-#define UI_W 320
-#define UI_H 240
+#define UI_W PLAT_PANEL_W
+#define UI_H PLAT_PANEL_H
 
 /* 3DS-scale equivalents of the style guide's --radius-lg and --radius-md. */
 #define UI_R_CARD 6
 #define UI_R_ROW  4
 
-static u8 *ui_fb = NULL;
+static plat_fb_t ui_s;
+static bool      ui_bound = false;
 
 /* Call once per redraw, before anything else - every primitive below assumes
    it has been called. */
 static inline void ui_bind(void) {
-  ui_fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+  ui_bound = plat_surface(PLAT_SURF_PANEL, &ui_s);
 }
 
-static inline void ui_px(int x, int y, u32 c) {
-  if (!ui_fb || x < 0 || x >= UI_W || y < 0 || y >= UI_H) return;
-  u32 off = (u32)(x * UI_H + (UI_H - 1 - y)) * 3;
-  ui_fb[off]     = (u8)(c & 0xff);          /* B */
-  ui_fb[off + 1] = (u8)((c >> 8) & 0xff);   /* G */
-  ui_fb[off + 2] = (u8)((c >> 16) & 0xff);  /* R */
+static inline void ui_px(int x, int y, uint32_t c) {
+  if (!ui_bound || x < 0 || x >= UI_W || y < 0 || y >= UI_H) return;
+  uint8_t *o = ui_s.base + (ptrdiff_t)x * ui_s.x_stride
+                         + (ptrdiff_t)y * ui_s.y_stride;
+  PLAT_PX(o, (uint8_t)((c >> 16) & 0xff), (uint8_t)((c >> 8) & 0xff), (uint8_t)(c & 0xff));
 }
 
-/* A vertical run at fixed x: the only shape the framebuffer is laid out for,
-   so every fill below is built from it. */
-static inline void ui_vspan(int x, int y, int h, u32 c) {
-  if (!ui_fb || x < 0 || x >= UI_W) return;
+/* A vertical run at fixed x. Every fill below is built from it. */
+static inline void ui_vspan(int x, int y, int h, uint32_t c) {
+  if (!ui_bound || x < 0 || x >= UI_W) return;
   if (y < 0) { h += y; y = 0; }
   if (y + h > UI_H) h = UI_H - y;
   if (h <= 0) return;
 
-  u8 b = (u8)(c & 0xff), g = (u8)((c >> 8) & 0xff), r = (u8)((c >> 16) & 0xff);
-  /* Offsets decrease as y increases, so start from the bottom of the span and
-     walk forward through memory. */
-  u8 *p = ui_fb + (u32)(x * UI_H + (UI_H - 1 - (y + h - 1))) * 3;
-  for (int i = 0; i < h; i++) { *p++ = b; *p++ = g; *p++ = r; }
+  uint8_t b = (uint8_t)(c & 0xff), g = (uint8_t)((c >> 8) & 0xff), r = (uint8_t)((c >> 16) & 0xff);
+  const ptrdiff_t ys = ui_s.y_stride;
+  uint8_t *p = ui_s.base + (ptrdiff_t)x * ui_s.x_stride + (ptrdiff_t)y * ys;
+  for (int i = 0; i < h; i++, p += ys) PLAT_PX(p, r, g, b);
 }
 
-static inline void ui_fill(int x, int y, int w, int h, u32 c) {
+static inline void ui_fill(int x, int y, int w, int h, uint32_t c) {
   if (x < 0) { w += x; x = 0; }
   if (x + w > UI_W) w = UI_W - x;
   for (int i = 0; i < w; i++) ui_vspan(x + i, y, h, c);
 }
 
-static inline void ui_clear(u32 c) { ui_fill(0, 0, UI_W, UI_H, c); }
-static inline void ui_hline(int x, int y, int w, u32 c) { ui_fill(x, y, w, 1, c); }
-static inline void ui_vline(int x, int y, int h, u32 c) { ui_vspan(x, y, h, c); }
+static inline void ui_clear(uint32_t c) { ui_fill(0, 0, UI_W, UI_H, c); }
+static inline void ui_hline(int x, int y, int w, uint32_t c) { ui_fill(x, y, w, 1, c); }
+static inline void ui_vline(int x, int y, int h, uint32_t c) { ui_vspan(x, y, h, c); }
 
 /* How far in row `dy` of a corner of radius `r` is inset from the edge.
    Integer circle test on half-pixel centres, doubled to stay in ints. */
@@ -81,7 +80,7 @@ static inline int ui_inset(int r, int dy) {
   return r;
 }
 
-static inline void ui_rrect(int x, int y, int w, int h, int r, u32 c) {
+static inline void ui_rrect(int x, int y, int w, int h, int r, uint32_t c) {
   if (w <= 0 || h <= 0) return;
   if (r * 2 > w) r = w / 2;
   if (r * 2 > h) r = h / 2;
@@ -96,7 +95,7 @@ static inline void ui_rrect(int x, int y, int w, int h, int r, u32 c) {
 }
 
 /* One-pixel outline of a rounded rect, for borders and focus rings. */
-static inline void ui_rrect_outline(int x, int y, int w, int h, int r, u32 c) {
+static inline void ui_rrect_outline(int x, int y, int w, int h, int r, uint32_t c) {
   if (w <= 0 || h <= 0) return;
   if (r * 2 > w) r = w / 2;
   if (r * 2 > h) r = h / 2;
@@ -129,7 +128,7 @@ static inline void ui_rrect_outline(int x, int y, int w, int h, int r, u32 c) {
 
 /* font8x8 covers ASCII 32-126 only; anything else draws as a space rather
    than indexing off the end of the table. */
-static inline void ui_char(int x, int y, char ch, u32 c, int scale) {
+static inline void ui_char(int x, int y, char ch, uint32_t c, int scale) {
   if (ch < 32 || ch > 126) ch = ' ';
   const unsigned char *g = font8x8[(int)ch - 32];
   for (int row = 0; row < 8; row++) {
@@ -145,7 +144,7 @@ static inline void ui_char(int x, int y, char ch, u32 c, int scale) {
 
 /* Transparent: only lit pixels are written, so text composites over whatever
    was painted underneath. */
-static inline void ui_text(int x, int y, const char *s, u32 c, int scale) {
+static inline void ui_text(int x, int y, const char *s, uint32_t c, int scale) {
   for (; *s; s++, x += 8 * scale) {
     if (x >= UI_W) break;
     ui_char(x, y, *s, c, scale);
@@ -156,17 +155,17 @@ static inline int ui_text_w(const char *s, int scale) {
   return (int)strlen(s) * 8 * scale;
 }
 
-static inline void ui_text_right(int right, int y, const char *s, u32 c, int scale) {
+static inline void ui_text_right(int right, int y, const char *s, uint32_t c, int scale) {
   ui_text(right - ui_text_w(s, scale), y, s, c, scale);
 }
 
-static inline void ui_text_centre(int x, int y, int w, const char *s, u32 c, int scale) {
+static inline void ui_text_centre(int x, int y, int w, const char *s, uint32_t c, int scale) {
   ui_text(x + (w - ui_text_w(s, scale)) / 2, y, s, c, scale);
 }
 
 /* Truncate with an ellipsis, so a long label cannot run under the value on
    its right. */
-static inline void ui_text_clip(int x, int y, int maxw, const char *s, u32 c, int scale) {
+static inline void ui_text_clip(int x, int y, int maxw, const char *s, uint32_t c, int scale) {
   int cw = 8 * scale;
   int fits = maxw / cw;
   int len = (int)strlen(s);
@@ -198,10 +197,10 @@ static inline void ui_focus_ring(const AdaPalette *p, int x, int y, int w, int h
 #define UI_TOGGLE_H 14
 
 static inline void ui_toggle(const AdaPalette *p, int x, int y, bool on) {
-  u32 track = on ? p->iris : p->hl_med;
+  uint32_t track = on ? p->iris : p->hl_med;
   ui_rrect(x, y, UI_TOGGLE_W, UI_TOGGLE_H, UI_TOGGLE_H / 2, track);
   int kx = on ? x + UI_TOGGLE_W - UI_TOGGLE_H + 1 : x + 1;
-  u32 knob = on ? (p->dark ? p->base : p->surface) : ada_lift(p, p->hl_high, 40);
+  uint32_t knob = on ? (p->dark ? p->base : p->surface) : ada_lift(p, p->hl_high, 40);
   ui_rrect(kx, y + 1, UI_TOGGLE_H - 2, UI_TOGGLE_H - 2, (UI_TOGGLE_H - 2) / 2, knob);
 }
 
@@ -214,7 +213,7 @@ typedef enum {
 
 static inline void ui_button(const AdaPalette *p, int x, int y, int w, int h,
                              const char *label, UiButtonState st) {
-  u32 fill, ink;
+  uint32_t fill, ink;
   switch (st) {
     case UI_BTN_SELECTED: fill = p->iris;   ink = p->dark ? p->base : p->surface; break;
     case UI_BTN_DANGER:   fill = ada_sink(p, p->love, 120); ink = ada_lift(p, p->love, 110); break;
@@ -262,12 +261,12 @@ static inline void ui_row(const AdaPalette *p, int x, int y, int w, int h,
                           bool focused, bool disabled) {
   if (focused) ui_rrect(x, y, w, h, UI_R_ROW, p->overlay);
 
-  u32 ink = disabled ? p->subtle : p->text;
-  u32 val = disabled ? p->subtle : (focused ? p->iris : p->muted);
+  uint32_t ink = disabled ? p->subtle : p->text;
+  uint32_t val = disabled ? p->subtle : (focused ? p->iris : p->muted);
 
   int vw = value ? ui_text_w(value, 1) : 0;
   ui_text_clip(x + 8, y + (h - 8) / 2, w - 24 - vw, label, ink, 1);
   if (value) ui_text_right(x + w - 8, y + (h - 8) / 2, value, val, 1);
 }
 
-#endif /* UI3DS_H */
+#endif /* CORE_UI_H */

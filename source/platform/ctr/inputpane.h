@@ -21,7 +21,7 @@
 
 #include "config.h"
 #include "theme.h"
-#include "ui3ds.h"
+#include "ui.h"
 
 #define PANE_TYPE_X   16
 #define PANE_TYPE_Y   72
@@ -48,10 +48,6 @@ static const struct { const char *label; const char *send; } pane_keys[PANE_KEY_
   { "DN",  "\x1b[B"   },
   { "RET", "\r"       },
 };
-
-/* Set by the applet path, read and cleared by the emulation thread; see
-   EmuStepBatch. */
-static volatile bool g_emu_rebase_clock = false;
 
 /* Open the system keyboard and send whatever comes back. Must not be called
  * from inside a frame. */
@@ -95,16 +91,17 @@ static void pane_prompt(void) {
 }
 
 /* Hit test and dispatch. Returns true if the touch was consumed. */
-static bool pane_touch(const touchPosition *t) {
-  if (t->px >= PANE_TYPE_X && t->px < PANE_TYPE_X + PANE_TYPE_W &&
-      t->py >= PANE_TYPE_Y && t->py < PANE_TYPE_Y + PANE_TYPE_H) {
+static bool pane_touch(const plat_input_t *in) {
+  int px = in->ptr_x, py = in->ptr_y;
+  if (px >= PANE_TYPE_X && px < PANE_TYPE_X + PANE_TYPE_W &&
+      py >= PANE_TYPE_Y && py < PANE_TYPE_Y + PANE_TYPE_H) {
     pane_prompt();
     return true;
   }
 
-  if (t->py >= PANE_KEY_Y && t->py < PANE_KEY_Y + PANE_KEY_H) {
+  if (py >= PANE_KEY_Y && py < PANE_KEY_Y + PANE_KEY_H) {
     int kw = UI_W / PANE_KEY_N;
-    int i = t->px / kw;
+    int i = px / kw;
     if (i >= 0 && i < PANE_KEY_N) {
       rx_push_str(pane_keys[i].send);
       pane_dirty = true;

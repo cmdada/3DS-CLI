@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
-#include <3ds.h>
+#include "plat.h"
 
 /*
  * Virtio-input device: the 3DS's motion sensors and sliders as a normal
@@ -10,7 +10,7 @@
  * These four - accelerometer, gyroscope, 3D slider, volume slider - are the
  * only 3DS inputs that map cleanly onto an existing guest driver, so they
  * get a real one. Everything else the console can report is a text file in
- * the `hw` 9P tree instead (see hw3ds.h for why). The sensors appear in
+ * the `hw` 9P tree instead (see the console's plat_hw.h for why). The sensors appear in
  * both places on purpose: evdev for programs that speak it, and
  * /mnt/hw/accel for a shell script that just wants a number.
  *
@@ -20,7 +20,7 @@
  * the device - nothing here has either, so it's drained and ignored.
  *
  * Sampling is driven from the main loop rather than from a timer: the
- * emulator is already a cooperative single thread, and hidScanInput() is
+ * emulator is already a cooperative single thread, and the console's input poll is
  * called there every frame anyway, so vinput_poll() is nearly free and
  * naturally rate-limits to the 3DS's own refresh.
  */
@@ -51,7 +51,6 @@
 #define ABS_VOLUME  0x20
 #define ABS_MISC    0x28
 
-#define VI_NAXES 8
 
 /* Axis table. The accelerometer and gyroscope report signed 16-bit counts
    straight from HID shared memory - no scaling, so a guest reading them
@@ -166,12 +165,12 @@ static bool vinput_push(uint8_t *ram, uint16_t type, uint16_t code, int32_t valu
     if (!desc_table || !avail_ring || !used_ring) return false;
 
     uint16_t avail_idx;
-    memcpy(&avail_idx, avail_ring + 2, 2);
+    avail_idx = g_ld16(avail_ring + 2);
     if (q->last_avail == avail_idx) return false;   /* no free buffer */
 
     uint16_t ring_pos = q->last_avail % VQUEUE_SIZE;
     uint16_t head;
-    memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+    head = g_ld16(avail_ring + 4u + ring_pos * 2u);
     q->last_avail++;
 
     uint64_t a; uint32_t l; uint16_t f, nx;
@@ -180,64 +179,31 @@ static bool vinput_push(uint8_t *ram, uint16_t type, uint16_t code, int32_t valu
 
     uint32_t written = 0;
     if (buf && l >= 8) {
-        memcpy(buf + 0, &type,  2);
-        memcpy(buf + 2, &code,  2);
-        memcpy(buf + 4, &value, 4);
+        g_st16(buf + 0, type);
+        g_st16(buf + 2, code);
+        g_st32(buf + 4, value);
         written = 8;
     }
 
     uint16_t used_idx_val;
-    memcpy(&used_idx_val, used_ring + 2, 2);
+    used_idx_val = g_ld16(used_ring + 2);
     uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
     uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
     uint32_t hd32 = head;
-    memcpy(ue + 0, &hd32, 4);
-    memcpy(ue + 4, &written, 4);
+    g_st32(ue + 0, hd32);
+    g_st32(ue + 4, written);
     used_idx_val++;
-    memcpy(used_ring + 2, &used_idx_val, 2);
+    g_st16(used_ring + 2, used_idx_val);
 
     vin.int_status |= 1u;
     return true;
 }
 
-/* Reads the actual hardware: accel/gyro come straight out of HID shared
-   memory, so reading them every frame is free. The volume slider needs an
-   actual IPC round trip to the HID service, and it's a physical slider
-   nobody moves 60 times a second, so it's sampled far more rarely.
-
-   Split out from vinput_poll() (below) because it must run on whichever
-   thread has been driving hidScanInput() each frame: hidAccelRead/
-   hidGyroRead return whatever hidScanInput() last cached, so calling them
-   fresh from a second thread that never calls hidScanInput() itself isn't
-   something to gamble on. The caller (main.c's main-thread loop) is
-   responsible for getting the result to vinput_poll() - which may now be
-   running on a different thread - via a locked handoff; see g_vinput_axes
-   in main.c. */
-static void vinput_sample_hw(int32_t out[VI_NAXES]) {
-    accelVector av = {0, 0, 0};
-    angularRate gr = {0, 0, 0};
-    if (hw.sensors) { hidAccelRead(&av); hidGyroRead(&gr); }
-
-    static int slider_div = 0;
-    static u8  vol = 0;
-    if (slider_div-- <= 0) {
-        slider_div = 30;
-        LightLock_Lock(&hid_ipc_lock);
-        Result r = HIDUSER_GetSoundVolume(&vol);
-        LightLock_Unlock(&hid_ipc_lock);
-        if (R_FAILED(r)) vol = 0;
-    }
-
-    out[0] = av.x; out[1] = av.y; out[2] = av.z;
-    out[3] = gr.x; out[4] = gr.y; out[5] = gr.z;
-    out[6] = (int32_t)(osGet3DSliderState() * 100.0f + 0.5f);
-    out[7] = (int32_t)vol;
-}
-
 /* Emits events for axes that moved since the last poll, followed by a
    SYN_REPORT if anything did. `cur` is a hardware sample already obtained
-   via vinput_sample_hw() - see that function's comment for why sampling
-   and injection are split like this. */
+   via plat_sample_axes(), which must run on whichever thread drives the
+   console's input polling; injection happens here, on the emulation
+   thread. */
 static void vinput_poll(uint8_t *ram, const int32_t cur[VI_NAXES]) {
     if (!vin.q[0].ready) return;
 
@@ -267,22 +233,22 @@ static void vinput_drain_statusq(uint8_t *ram) {
     if (!desc_table || !avail_ring || !used_ring) return;
 
     uint16_t avail_idx;
-    memcpy(&avail_idx, avail_ring + 2, 2);
+    avail_idx = g_ld16(avail_ring + 2);
     while (q->last_avail != avail_idx) {
         uint16_t ring_pos = q->last_avail % VQUEUE_SIZE;
         uint16_t head;
-        memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        head = g_ld16(avail_ring + 4u + ring_pos * 2u);
         q->last_avail++;
 
         uint16_t used_idx_val;
-        memcpy(&used_idx_val, used_ring + 2, 2);
+        used_idx_val = g_ld16(used_ring + 2);
         uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
         uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
         uint32_t hd32 = head, zero = 0;
-        memcpy(ue + 0, &hd32, 4);
-        memcpy(ue + 4, &zero, 4);
+        g_st32(ue + 0, hd32);
+        g_st32(ue + 4, zero);
         used_idx_val++;
-        memcpy(used_ring + 2, &used_idx_val, 2);
+        g_st16(used_ring + 2, used_idx_val);
         vin.int_status |= 1u;
     }
     if (vin.int_status) plic_set_pending(PLIC_SRC_INPUT, true);

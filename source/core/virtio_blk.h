@@ -121,14 +121,54 @@ static inline uint8_t *guest_ptr(uint8_t *ram, uint32_t gpa, uint32_t len) {
 }
 
 /* Read virtq descriptor fields via memcpy (avoids unaligned-access UB) */
+/* The destination of a disk read is wherever in guest RAM the driver pointed
+   its descriptor, which is aligned to nothing in particular. Some consoles'
+   filesystems require an aligned destination - the Wii U's wants 0x40 - so
+   there the transfer goes through an aligned buffer and is copied across.
+   Consoles without the constraint read straight into guest memory, which is
+   what this always did. */
+#ifdef PLAT_FS_NEEDS_ALIGNED_IO
+#define VBLK_BOUNCE_SZ (32u * 1024u)
+static uint8_t vblk_bounce[VBLK_BOUNCE_SZ] __attribute__((aligned(64)));
+
+static size_t vblk_read(FILE *f, uint8_t *dst, uint32_t len) {
+    size_t total = 0;
+    while (len) {
+        uint32_t n = len < VBLK_BOUNCE_SZ ? len : VBLK_BOUNCE_SZ;
+        size_t got = fread(vblk_bounce, 1, n, f);
+        if (!got) break;
+        memcpy(dst, vblk_bounce, got);
+        dst += got; total += got; len -= (uint32_t)got;
+        if (got < n) break;
+    }
+    return total;
+}
+
+static void vblk_write(FILE *f, const uint8_t *src, uint32_t len) {
+    while (len) {
+        uint32_t n = len < VBLK_BOUNCE_SZ ? len : VBLK_BOUNCE_SZ;
+        memcpy(vblk_bounce, src, n);
+        if (fwrite(vblk_bounce, 1, n, f) != n) break;
+        src += n; len -= n;
+    }
+}
+#else
+static inline size_t vblk_read(FILE *f, uint8_t *dst, uint32_t len) {
+    return fread(dst, 1, len, f);
+}
+static inline void vblk_write(FILE *f, const uint8_t *src, uint32_t len) {
+    fwrite(src, 1, len, f);
+}
+#endif
+
 static void vblk_read_desc(uint8_t *desc_table, uint16_t idx,
                             uint64_t *addr, uint32_t *len,
                             uint16_t *flags, uint16_t *next) {
     uint8_t *d = desc_table + (uint32_t)idx * 16u;
-    memcpy(addr,  d + 0, 8);
-    memcpy(len,   d + 8, 4);
-    memcpy(flags, d + 12, 2);
-    memcpy(next,  d + 14, 2);
+    *addr  = g_ld64(d + 0);
+    *len   = g_ld32(d + 8);
+    *flags = g_ld16(d + 12);
+    *next  = g_ld16(d + 14);
 }
 
 /* Process all pending virtq entries when the guest rings the doorbell */
@@ -143,12 +183,12 @@ static void vblk_process_queue(vblk_dev_t *d, uint8_t *ram) {
 
     /* avail ring layout: flags(2) idx(2) ring[N](2 each) */
     uint16_t avail_idx;
-    memcpy(&avail_idx, avail_ring + 2, 2);
+    avail_idx = g_ld16(avail_ring + 2);
 
     while (d->last_avail_idx != avail_idx) {
         uint16_t ring_pos = d->last_avail_idx % VQUEUE_SIZE;
         uint16_t head;
-        memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        head = g_ld16(avail_ring + 4u + ring_pos * 2u);
         d->last_avail_idx++;
 
         /* Collect descriptor chain (max 64 entries) */
@@ -174,8 +214,8 @@ static void vblk_process_queue(vblk_dev_t *d, uint8_t *ram) {
 
             uint32_t req_type;
             uint64_t sector;
-            memcpy(&req_type, hdr + 0, 4);
-            memcpy(&sector,   hdr + 8, 8);
+            req_type = g_ld32(hdr + 0);
+            sector = g_ld64(hdr + 8);
 
             uint8_t  req_status   = VBLK_S_OK;
             uint32_t bytes_xfer   = 0;
@@ -194,12 +234,11 @@ static void vblk_process_queue(vblk_dev_t *d, uint8_t *ram) {
                     long disk_off = (long)(sector * SECTOR_SZ);
                     if (req_type == VBLK_T_IN) {
                         fseek(d->disk, disk_off, SEEK_SET);
-                        size_t n = fread(buf, 1, dl, d->disk);
-                        bytes_xfer += (uint32_t)n;
+                        bytes_xfer += (uint32_t)vblk_read(d->disk, buf, dl);
                         sector     += dl / SECTOR_SZ;
                     } else if (req_type == VBLK_T_OUT) {
                         fseek(d->disk, disk_off, SEEK_SET);
-                        fwrite(buf, 1, dl, d->disk);
+                        vblk_write(d->disk, buf, dl);
                         bytes_xfer += dl;
                         sector     += dl / SECTOR_SZ;
                     } else if (req_type == VBLK_T_FLUSH) {
@@ -211,14 +250,14 @@ static void vblk_process_queue(vblk_dev_t *d, uint8_t *ram) {
             /* Write completion to used ring */
             /* used layout: flags(2) idx(2) ring[N]: id(4) len(4) */
             uint16_t used_idx_val;
-            memcpy(&used_idx_val, used_ring + 2, 2);
+            used_idx_val = g_ld16(used_ring + 2);
             uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
             uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
             uint32_t hd32 = head;
-            memcpy(ue + 0, &hd32,       4);
-            memcpy(ue + 4, &bytes_xfer, 4);
+            g_st32(ue + 0, hd32);
+            g_st32(ue + 4, bytes_xfer);
             used_idx_val++;
-            memcpy(used_ring + 2, &used_idx_val, 2);
+            g_st16(used_ring + 2, used_idx_val);
         }
 
         d->int_status |= 1u; /* VIRTIO_INT_VRING */

@@ -1,15 +1,12 @@
 #ifndef TERMINAL_H
 #define TERMINAL_H
 
-#include <3ds.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include "font.h" // font8x8 and font5x7
-
-#define TERM_COLS 80
-#define TERM_ROWS 30
-#define TERM_SCROLLBACK 200
+#include "plat.h"   // plat_fb_t, plat_us; TERM_COLS/ROWS come from plat_cfg.h
+#include "font.h"   // font8x8 and font5x7
 
 #define TERM_FLAG_BOLD      (1 << 0)
 #define TERM_FLAG_DIM       (1 << 1)
@@ -23,10 +20,10 @@ enum TermParserState {
 };
 
 typedef struct {
-  u32 fg;
-  u32 bg;
+  uint32_t fg;
+  uint32_t bg;
   char c;
-  u8 flags;
+  uint8_t flags;
 } TermCell;
 
 typedef struct {
@@ -38,12 +35,12 @@ typedef struct {
 
   int cx, cy;
   int saved_cx, saved_cy;
-  u32 cur_fg;
-  u32 cur_bg;
-  u8 cur_flags;
+  uint32_t cur_fg;
+  uint32_t cur_bg;
+  uint8_t cur_flags;
 
-  u32 default_fg;
-  u32 default_bg;
+  uint32_t default_fg;
+  uint32_t default_bg;
 
   int scroll_top;
   int scroll_bottom;
@@ -72,7 +69,7 @@ typedef struct {
 // Not const: term_set_palette() swaps this out wholesale on a theme change.
 // The initial values are the conventional xterm 16, which "xterm classic" in
 // the settings restores.
-static u32 ansi_colors[16] = {
+static uint32_t ansi_colors[16] = {
   // Normal colors
   0x000000, 0xcd0000, 0x00cd00, 0xcdcd00,
   0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
@@ -81,7 +78,7 @@ static u32 ansi_colors[16] = {
   0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff
 };
 
-static inline u32 xterm_256_to_rgb(u8 index) {
+static inline uint32_t xterm_256_to_rgb(uint8_t index) {
   if (index < 8) {
     return ansi_colors[index];
   } else if (index < 16) {
@@ -169,10 +166,10 @@ static inline void term_init(TermState *ts) {
    slots hold the same value the first match wins - hence fg/bg being checked
    ahead of the table, so the terminal's own background never loses to an ANSI
    slot sharing its value. */
-static inline u32 term_remap_color(u32 c,
-                                   const u32 old_pal[16], const u32 new_pal[16],
-                                   u32 old_fg, u32 new_fg,
-                                   u32 old_bg, u32 new_bg) {
+static inline uint32_t term_remap_color(uint32_t c,
+                                   const uint32_t old_pal[16], const uint32_t new_pal[16],
+                                   uint32_t old_fg, uint32_t new_fg,
+                                   uint32_t old_bg, uint32_t new_bg) {
   if (c == old_bg) return new_bg;
   if (c == old_fg) return new_fg;
   for (int i = 0; i < 16; i++) if (c == old_pal[i]) return new_pal[i];
@@ -185,11 +182,11 @@ static inline u32 term_remap_color(u32 c,
  * all of which the emulation thread writes. Walking 18400 cells is a few
  * milliseconds, so this is a one-shot, never something the draw path does.
  */
-static inline void term_set_palette(TermState *ts, const u32 pal[16],
-                                    u32 fg, u32 bg) {
-  u32 old_pal[16];
+static inline void term_set_palette(TermState *ts, const uint32_t pal[16],
+                                    uint32_t fg, uint32_t bg) {
+  uint32_t old_pal[16];
   memcpy(old_pal, ansi_colors, sizeof(old_pal));
-  u32 old_fg = ts->default_fg, old_bg = ts->default_bg;
+  uint32_t old_fg = ts->default_fg, old_bg = ts->default_bg;
 
   if (memcmp(old_pal, pal, sizeof(old_pal)) == 0 && old_fg == fg && old_bg == bg)
     return;
@@ -512,30 +509,30 @@ static inline void term_write_char(TermState *ts, char c) {
   }
 }
 
-static inline void term_draw_char_5x7(u8 *fb, int px, int py, char c, u32 fg, u32 bg, int zx, int zy, u8 flags) {
+static inline void term_draw_char_5x7(const plat_fb_t *fb, int px, int py, char c, uint32_t fg, uint32_t bg, int zx, int zy, uint8_t flags) {
   if (c < 32 || c > 127) c = ' ';
   int glyph_idx = (unsigned char)c;
   const unsigned char *glyph = &font5x7[glyph_idx * 5];
 
   bool is_reverse = (flags & TERM_FLAG_REVERSE);
-  u32 draw_fg = is_reverse ? bg : fg;
-  u32 draw_bg = is_reverse ? fg : bg;
+  uint32_t draw_fg = is_reverse ? bg : fg;
+  uint32_t draw_bg = is_reverse ? fg : bg;
 
-  u8 fr = (draw_fg >> 16) & 0xff;
-  u8 fg_g = (draw_fg >> 8) & 0xff;
-  u8 fb_c = draw_fg & 0xff;
+  uint8_t fr = (draw_fg >> 16) & 0xff;
+  uint8_t fg_g = (draw_fg >> 8) & 0xff;
+  uint8_t fb_c = draw_fg & 0xff;
 
-  u8 br = (draw_bg >> 16) & 0xff;
-  u8 bg_g = (draw_bg >> 8) & 0xff;
-  u8 bb_c = draw_bg & 0xff;
+  uint8_t br = (draw_bg >> 16) & 0xff;
+  uint8_t bg_g = (draw_bg >> 8) & 0xff;
+  uint8_t bb_c = draw_bg & 0xff;
 
   for (int col = 0; col < 6; col++) {
     unsigned char bits = (col < 5) ? glyph[col] : 0;
     for (int row = 0; row < 8; row++) {
       bool pixel_on = (bits & (1 << row)) != 0;
-      u8 r = pixel_on ? fr : br;
-      u8 g = pixel_on ? fg_g : bg_g;
-      u8 b = pixel_on ? fb_c : bb_c;
+      uint8_t r = pixel_on ? fr : br;
+      uint8_t g = pixel_on ? fg_g : bg_g;
+      uint8_t b = pixel_on ? fb_c : bb_c;
 
       if (flags & TERM_FLAG_DIM && pixel_on) {
         r /= 2; g /= 2; b /= 2;
@@ -546,38 +543,39 @@ static inline void term_draw_char_5x7(u8 *fb, int px, int py, char c, u32 fg, u3
 
       for (int dy = 0; dy < zy; dy++) {
         int ry = py + row * zy + dy;
-        if (ry < 0 || ry >= 240) continue;
+        if (ry < 0 || ry >= fb->h) continue;
         for (int dx = 0; dx < zx; dx++) {
           int rx = px + col * zx + dx;
-          if (rx < 0 || rx >= 400) continue;
-          u32 off = (rx * 240 + (239 - ry)) * 3;
-          fb[off] = b; fb[off+1] = g; fb[off+2] = r;
+          if (rx < 0 || rx >= fb->w) continue;
+          uint8_t *o = fb->base + (ptrdiff_t)rx * fb->x_stride
+                                + (ptrdiff_t)ry * fb->y_stride;
+          PLAT_PX(o, r, g, b);
         }
       }
     }
   }
 }
 
-static inline void term_draw_char_8x8(u8 *fb, int px, int py, char c, u32 fg, u32 bg, int zx, int zy, u8 flags) {
+static inline void term_draw_char_8x8(const plat_fb_t *fb, int px, int py, char c, uint32_t fg, uint32_t bg, int zx, int zy, uint8_t flags) {
   if (c < 32 || c > 126) c = ' ';
   const unsigned char *glyph = font8x8[(int)c - 32];
 
   bool is_reverse = (flags & TERM_FLAG_REVERSE);
-  u32 draw_fg = is_reverse ? bg : fg;
-  u32 draw_bg = is_reverse ? fg : bg;
+  uint32_t draw_fg = is_reverse ? bg : fg;
+  uint32_t draw_bg = is_reverse ? fg : bg;
 
-  u8 fr = (draw_fg >> 16) & 0xff;
-  u8 fg_g = (draw_fg >> 8) & 0xff;
-  u8 fb_c = draw_fg & 0xff;
+  uint8_t fr = (draw_fg >> 16) & 0xff;
+  uint8_t fg_g = (draw_fg >> 8) & 0xff;
+  uint8_t fb_c = draw_fg & 0xff;
 
-  u8 br = (draw_bg >> 16) & 0xff;
-  u8 bg_g = (draw_bg >> 8) & 0xff;
-  u8 bb_c = draw_bg & 0xff;
+  uint8_t br = (draw_bg >> 16) & 0xff;
+  uint8_t bg_g = (draw_bg >> 8) & 0xff;
+  uint8_t bb_c = draw_bg & 0xff;
 
   // Fast path for the default (unzoomed) case, which is also the most
   // common one. term_draw()'s call-site math (px/py are always multiples
   // of char_w/char_h, and vis_cols/vis_rows are floor(screen/char_w,h))
-  // guarantees the full 8x8 box lands inside [0,400)x[0,240) whenever
+  // guarantees the full 8x8 box lands inside the surface whenever
   // zx==zy==1 for this font specifically - unlike term_draw_char_5x7,
   // whose 6-column draw loop against a 5-wide stride can touch one column
   // past the edge even at zoom 1 (see that function), 8x8's loop bounds
@@ -586,33 +584,34 @@ static inline void term_draw_char_8x8(u8 *fb, int px, int py, char c, u32 fg, u3
   if (zx == 1 && zy == 1) {
     // Everything that does not vary per pixel is hoisted out of the inner
     // loop. Dim depends only on the cell, underline only on the row, and the
-    // framebuffer offset advances by a constant 720-byte column stride as the
-    // column advances - so the multiply, the three ternaries and the two
-    // branches that used to run for each of the ~96000 pixels drawn per frame
-    // all leave, and what remains is a bit test and three predicated stores.
-    // (Bytes go out B,G,R, matching the framebuffer layout.)
-    u8 on_b = fb_c, on_g = fg_g, on_r = fr;
+    // address advances by a constant x_stride as the column advances - so the
+    // multiply, the three ternaries and the two branches that used to run for
+    // each of the ~96000 pixels drawn per frame all leave, and what remains is
+    // a bit test and three predicated stores.
+    //
+    // Channel order is PLAT_PX's, fixed at compile time per console.
+    const ptrdiff_t xs = fb->x_stride;
+    uint8_t on_b = fb_c, on_g = fg_g, on_r = fr;
     if (flags & TERM_FLAG_DIM) { on_b /= 2; on_g /= 2; on_r /= 2; }
     bool underline = flags & TERM_FLAG_UNDERLINE;
 
     for (int row = 0; row < 8; row++) {
-      u32 o = (u32)px * 720u + (u32)(239 - (py + row)) * 3u;
+      uint8_t *o = fb->base + (ptrdiff_t)px * xs
+                            + (ptrdiff_t)(py + row) * fb->y_stride;
 
       // Underlined row 7 is solid foreground across the whole cell, lit or
       // not, and is not dimmed - same as the per-pixel version it replaces.
       if (underline && row == 7) {
-        for (int col = 0; col < 8; col++, o += 720u) {
-          fb[o] = fb_c; fb[o+1] = fg_g; fb[o+2] = fr;
+        for (int col = 0; col < 8; col++, o += xs) {
+          PLAT_PX(o, fr, fg_g, fb_c);
         }
         continue;
       }
 
       unsigned char bits = glyph[row];
-      for (int col = 0; col < 8; col++, o += 720u, bits >>= 1) {
+      for (int col = 0; col < 8; col++, o += xs, bits >>= 1) {
         int lit = bits & 1;
-        fb[o]   = lit ? on_b : bb_c;
-        fb[o+1] = lit ? on_g : bg_g;
-        fb[o+2] = lit ? on_r : br;
+        PLAT_PX(o, lit ? on_r : br, lit ? on_g : bg_g, lit ? on_b : bb_c);
       }
     }
     return;
@@ -622,9 +621,9 @@ static inline void term_draw_char_8x8(u8 *fb, int px, int py, char c, u32 fg, u3
     unsigned char bits = glyph[row];
     for (int col = 0; col < 8; col++) {
       bool pixel_on = (bits & (1 << col)) != 0;
-      u8 r = pixel_on ? fr : br;
-      u8 g = pixel_on ? fg_g : bg_g;
-      u8 b = pixel_on ? fb_c : bb_c;
+      uint8_t r = pixel_on ? fr : br;
+      uint8_t g = pixel_on ? fg_g : bg_g;
+      uint8_t b = pixel_on ? fb_c : bb_c;
 
       if (flags & TERM_FLAG_DIM && pixel_on) {
         r /= 2; g /= 2; b /= 2;
@@ -635,27 +634,38 @@ static inline void term_draw_char_8x8(u8 *fb, int px, int py, char c, u32 fg, u3
 
       for (int dy = 0; dy < zy; dy++) {
         int ry = py + row * zy + dy;
-        if (ry < 0 || ry >= 240) continue;
+        if (ry < 0 || ry >= fb->h) continue;
         for (int dx = 0; dx < zx; dx++) {
           int rx = px + col * zx + dx;
-          if (rx < 0 || rx >= 400) continue;
-          u32 off = (rx * 240 + (239 - ry)) * 3;
-          fb[off] = b; fb[off+1] = g; fb[off+2] = r;
+          if (rx < 0 || rx >= fb->w) continue;
+          uint8_t *o = fb->base + (ptrdiff_t)rx * fb->x_stride
+                                + (ptrdiff_t)ry * fb->y_stride;
+          PLAT_PX(o, r, g, b);
         }
       }
     }
   }
 }
 
-static inline void term_draw(TermState *ts, u8 *fb) {
+/* The cursor's blink phase. Drawing reads it, and so does the main loop's
+   dirty-marking, which is the only thing that schedules a repaint while the
+   guest is silent - so both must read the same phase or the caret changes
+   state on a frame nobody repainted. */
+#define TERM_BLINK_PERIOD_US 500000u
+
+static inline bool term_blink_on(void) {
+  return (plat_us() / TERM_BLINK_PERIOD_US) % 2 == 0;
+}
+
+static inline void term_draw(TermState *ts, const plat_fb_t *fb) {
   int font_w = ts->use_5x7 ? 5 : 8;
   int font_h = 8;
   int char_w = font_w * ts->zoom_x;
   int char_h = font_h * ts->zoom_y;
 
-  int vis_cols = 400 / char_w;
+  int vis_cols = fb->w / char_w;
   if (vis_cols > TERM_COLS) vis_cols = TERM_COLS;
-  int vis_rows = 240 / char_h;
+  int vis_rows = fb->h / char_h;
   if (vis_rows > TERM_ROWS) vis_rows = TERM_ROWS;
 
   if (ts->auto_track) {
@@ -685,9 +695,9 @@ static inline void term_draw(TermState *ts, u8 *fb) {
   if (ts->scroll_y > max_scroll_y) ts->scroll_y = max_scroll_y;
   if (ts->scroll_y < min_scroll_y) ts->scroll_y = min_scroll_y;
 
-  u8 bg_r = (ts->default_bg >> 16) & 0xff;
-  u8 bg_g = (ts->default_bg >> 8) & 0xff;
-  u8 bg_b = ts->default_bg & 0xff;
+  uint8_t bg_r = (ts->default_bg >> 16) & 0xff;
+  uint8_t bg_g = (ts->default_bg >> 8) & 0xff;
+  uint8_t bg_b = ts->default_bg & 0xff;
 
   // Every visible cell paints its own background across its whole box (see
   // both term_draw_char_* below - they write a pixel for every position in
@@ -696,49 +706,29 @@ static inline void term_draw(TermState *ts, u8 *fb) {
   // clearing are the margins the grid cannot reach, when the screen is not a
   // whole number of cells wide or tall.
   //
-  // Clearing all 400x240 first - a 288KB memcpy, at up to 30fps, on the same
-  // thread the touch UI runs on - was therefore almost pure waste: at the
-  // default 8x8 font the grid covers the screen exactly (50x30 cells) and
-  // there is nothing to clear at all.
+  // Clearing the whole screen first - a 288KB write on the 3DS, at up to
+  // 30fps, on the same thread the touch UI runs on - was therefore almost
+  // pure waste: at the default 8x8 font the grid covers the screen exactly
+  // and there is nothing to clear at all.
   int covered_w = vis_cols * char_w;
   int covered_h = vis_rows * char_h;
 
-  if (covered_w < 400 || covered_h < 240) {
-    // Each screen column is 240 contiguous BGR pixels (240*3 = 720 bytes) in
-    // this rotated framebuffer layout, and every column gets the same solid
-    // fill - build one column's worth and memcpy it, instead of separate
-    // 3-byte stores through fb_pixel-style indexing. Rebuilt only when the
-    // default background actually changes; 0xffffffff is not a reachable
-    // 24-bit colour, so it is a safe "not built yet" marker.
-    static u8 bg_col[240 * 3];
-    static u32 bg_col_colour = 0xffffffffu;
-    if (bg_col_colour != ts->default_bg) {
-      for (int y = 0; y < 240; y++) {
-        bg_col[y*3] = bg_b; bg_col[y*3+1] = bg_g; bg_col[y*3+2] = bg_r;
-      }
-      bg_col_colour = ts->default_bg;
-    }
-
-    // Bottom margin, for the columns the grid does cover. y runs backwards
-    // within a column here, so rows [covered_h,240) are the *first*
-    // (240-covered_h)*3 bytes of each one.
-    if (covered_h < 240) {
-      size_t bottom = (size_t)(240 - covered_h) * 3;
-      for (int x = 0; x < covered_w; x++) {
-        memcpy(fb + (size_t)x * 240 * 3, bg_col, bottom);
-      }
-    }
-    // Right margin: whole columns.
-    for (int x = covered_w; x < 400; x++) {
-      memcpy(fb + (size_t)x * 240 * 3, bg_col, sizeof(bg_col));
+  // Per-pixel rather than a stride-aware memcpy: which axis is contiguous
+  // depends on the surface, and this runs only for the leftover strip at
+  // zoom levels that do not divide the screen evenly.
+  if (covered_w < fb->w || covered_h < fb->h)
+  for (int x = 0; x < fb->w; x++) {
+    int y0 = (x < covered_w) ? covered_h : 0;
+    for (int y = y0; y < fb->h; y++) {
+      uint8_t *o = fb->base + (ptrdiff_t)x * fb->x_stride
+                            + (ptrdiff_t)y * fb->y_stride;
+      PLAT_PX(o, bg_r, bg_g, bg_b);
     }
   }
 
-  // 268 MHz system clock, so 268000LL ticks per ms. 500 ms period.
   // With blinking off the cursor is always on: the setting stops the block
   // flashing, it does not hide the caret.
-  bool blink_on = !ts->cursor_blink ||
-                  (svcGetSystemTick() / (268000LL * 500)) % 2 == 0;
+  bool blink_on = !ts->cursor_blink || term_blink_on();
 
   for (int vy = 0; vy < vis_rows; vy++) {
     int gy = ts->scroll_y + vy;
@@ -771,7 +761,7 @@ static inline void term_draw(TermState *ts, u8 *fb) {
         break;
       }
 
-      u8 cell_flags = cell.flags;
+      uint8_t cell_flags = cell.flags;
       // Only draw cursor when viewing live grid
       if (gy >= 0 && gx == ts->cx && gy == ts->cy && ts->cursor_visible && blink_on) {
         cell_flags ^= TERM_FLAG_REVERSE;

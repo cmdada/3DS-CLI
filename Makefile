@@ -39,9 +39,9 @@ BUILD		:=	build
 # The touch keyboard is built from source alongside the app rather than
 # linked as a prebuilt .a, so there's still exactly one `make` to run and the
 # submodule needs no separate build step.
-SOURCES		:=	source vendor/ctr-osk-rt/source
+SOURCES		:=	source/core source/platform/ctr vendor/ctr-osk-rt/source
 DATA		:=	data
-INCLUDES	:=	include vendor/mini-rv32ima-mmu \
+INCLUDES	:=	source/core source/platform source/platform/ctr vendor/mini-rv32ima-mmu \
 			vendor/ctr-osk-rt/include vendor/ctr-osk-rt/source
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
@@ -187,7 +187,7 @@ export BANNER_AUDIO := $(TOPDIR)/assets/silence.wav
 export BANNER       := $(TOPDIR)/$(BUILD)/banner.bnr
 export APP_RSF      := $(TOPDIR)/assets/app.rsf
 
-.PHONY: all clean cia dtb check
+.PHONY: all clean cia dtb check wiiu switch wii gamecube
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
@@ -208,17 +208,11 @@ check: $(OUTPUT).3dsx
 	fi
 
 #---------------------------------------------------------------------------------
-# Regenerate source/default64mbdtc.h from source/3ds-cli.dts (requires dtc + python3)
+# Regenerate source/default64mbdtc.h from source/3ds-cli.dts (requires dtc +
+# python3). Every console's build consumes the header, so the generator lives
+# in tools/ rather than inline here - CI runs the same script.
 dtb:
-	@dtc -I dts -O dtb -o /tmp/3ds-cli.dtb source/3ds-cli.dts
-	@python3 -c "\
-import struct, sys; \
-data = bytearray(open('/tmp/3ds-cli.dtb','rb').read()); \
-off = data.find(bytes([0xde,0xad,0xc0,0xde])); \
-assert off != -1, 'sentinel 0xdeadc0de not found in DTB'; \
-rows = [', '.join(f'0x{b:02x}' for b in data[i:i+16]) for i in range(0, len(data), 16)]; \
-open('source/default64mbdtc.h','w').write('static const unsigned char default64mbdtb[] = {\n' + ',\n'.join(rows) + '\n};\n#define DTB_MEM_SIZE_OFFSET ' + str(off) + '\n'); \
-print(f'DTB: {len(data)} bytes, patch offset {off:#x}')"
+	@python3 $(CURDIR)/tools/gen_dtb.py
 
 cia: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile cia
@@ -235,6 +229,13 @@ ifneq ($(DEPSDIR),$(BUILD))
 $(DEPSDIR):
 	@mkdir -p $@
 endif
+
+#---------------------------------------------------------------------------------
+# The other consoles. Each has its own makefile under mk/ because devkitPro
+# ships a separate rules file per platform and they cannot be included
+# together; source/core is shared, source/platform/<console> is not.
+wiiu switch wii gamecube:
+	@$(MAKE) --no-print-directory -f $(CURDIR)/mk/$@.mk
 
 #---------------------------------------------------------------------------------
 clean:

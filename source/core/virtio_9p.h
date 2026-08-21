@@ -6,8 +6,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <3ds.h>
-#include "hw3ds.h"
+#include "plat.h"
 
 /*
  * Virtio-9p device: 3DS-side filesystem passthrough.
@@ -15,10 +14,10 @@
  * One virtio-9p device (mount tag "3ds") exporting a synthetic root whose
  * subdirectories are the four things worth reaching:
  *
- *   sd/    the real SD card (sdmc:/), read-write
- *   nand/  the CTR NAND filesystem, read-only
- *   twl/   the TWL NAND filesystem, read-only
- *   hw/    synthetic sensor/camera/mic/audio files (hw3ds.h)
+ *   sd/    the real SD card, read-write
+ *   nand/  the CTR NAND filesystem, read-only (3DS only)
+ *   twl/   the TWL NAND filesystem, read-only (3DS only)
+ *   hw/    synthetic sensor/camera/mic/audio files (the console's plat_hw.h)
  *
  * So a single `mount -t 9p ... 3ds /mnt/3ds` brings up all of them. They are
  * subdirectories rather than four separate mounts because Linux's virtio-9p
@@ -160,60 +159,31 @@
    cannot work — only the first would succeed. Exporting them as
    subdirectories of one tree sidesteps that entirely, and still leaves
    aname= usable for mounting a single subtree on its own. */
-enum { V9P_TREE_SD = 0, V9P_TREE_NAND, V9P_TREE_TWL, V9P_TREE_HW,
-       V9P_TREE_COUNT, V9P_TREE_ROOT = V9P_TREE_COUNT, V9P_TREE_TOTAL };
+/* Which real trees exist is the console's business (plat_v9p_trees), so the
+   tables below are filled at init rather than declared. The two synthetic
+   trees sit above them at fixed indices, which is why the real ones are
+   capped rather than counted. */
+#define V9P_MAX_REAL    4
+#define V9P_TREE_HW     V9P_MAX_REAL
+#define V9P_TREE_ROOT   (V9P_MAX_REAL + 1)
+#define V9P_TREE_TOTAL  (V9P_MAX_REAL + 2)
+#define V9P_TREE_COUNT  v9p_nreal   /* end of the real trees, exclusive */
 
-static const char *const v9p_tree_aname[V9P_TREE_TOTAL] =
-    { "sd", "nand", "twl", "hw", "/" };
-static const char *const v9p_tree_root[V9P_TREE_TOTAL]  =
-    { "sdmc:/", "v9nand:/", "v9twl:/", "/", "/" };
-/* The root listing is synthetic, so it's read-only like the NAND trees. */
-static const bool        v9p_tree_ro[V9P_TREE_TOTAL]    =
-    { false, true, true, false, true };
+static int               v9p_nreal;
+static const char       *v9p_tree_aname[V9P_TREE_TOTAL];
+static const char       *v9p_tree_root[V9P_TREE_TOTAL];
+/* The root listing is synthetic, so it's read-only like any NAND tree. */
+static bool              v9p_tree_ro[V9P_TREE_TOTAL];
 static bool              v9p_tree_ok[V9P_TREE_TOTAL];
 
 /* ------------------------------------------------------------------
  * Synthetic `hw` tree
  * ------------------------------------------------------------------ */
 
-enum { HWS_NONE = 0, HWS_CAM_OUT, HWS_CAM_IN, HWS_MIC, HWS_AUDIO };
-
-typedef struct {
-    const char *name;
-    uint32_t    perm;                        /* permission bits only */
-    int       (*rd_text)(char *b, int n);
-    int       (*wr)(const char *b, int len);
-    int         stream;
-} v9p_hw_ent;
-
-static const v9p_hw_ent v9p_hw_files[] = {
-    { "info",             0444, hw_rd_info,           NULL,        HWS_NONE },
-    { "battery",          0444, hw_rd_battery,        NULL,        HWS_NONE },
-    { "battery_voltage",  0444, hw_rd_battery_voltage,NULL,        HWS_NONE },
-    { "charging",         0444, hw_rd_charging,       NULL,        HWS_NONE },
-    { "adapter",          0444, hw_rd_adapter,        NULL,        HWS_NONE },
-    { "shell",            0444, hw_rd_shell,          NULL,        HWS_NONE },
-    { "steps",            0444, hw_rd_steps,          NULL,        HWS_NONE },
-    { "wifi",             0444, hw_rd_wifi,           NULL,        HWS_NONE },
-    { "accel",            0444, hw_rd_accel,          NULL,        HWS_NONE },
-    { "gyro",             0444, hw_rd_gyro,           NULL,        HWS_NONE },
-    { "slider_3d",        0444, hw_rd_slider_3d,      NULL,        HWS_NONE },
-    { "slider_volume",    0444, hw_rd_slider_volume,  NULL,        HWS_NONE },
-    { "model",            0444, hw_rd_model,          NULL,        HWS_NONE },
-    { "region",           0444, hw_rd_region,         NULL,        HWS_NONE },
-    { "language",         0444, hw_rd_language,       NULL,        HWS_NONE },
-    { "firmware",         0444, hw_rd_firmware,       NULL,        HWS_NONE },
-    { "leds",             0222, NULL,                 hw_wr_leds,  HWS_NONE },
-    { "camera_outer.rgb565", 0444, NULL,              NULL,        HWS_CAM_OUT },
-    { "camera_inner.rgb565", 0444, NULL,              NULL,        HWS_CAM_IN  },
-    { "mic.pcm",          0444, NULL,                 NULL,        HWS_MIC   },
-    { "audio.pcm",        0222, NULL,                 NULL,        HWS_AUDIO },
-};
-#define V9P_HW_COUNT ((int)(sizeof(v9p_hw_files)/sizeof(v9p_hw_files[0])))
 
 static int v9p_hw_lookup(const char *name) {
-    for (int i = 0; i < V9P_HW_COUNT; i++)
-        if (!strcmp(v9p_hw_files[i].name, name)) return i;
+    for (int i = 0; i < plat_hw_count; i++)
+        if (!strcmp(plat_hw_files[i].name, name)) return i;
     return -1;
 }
 
@@ -227,7 +197,7 @@ typedef struct {
     int      tree;
     char     path[V9P_PATH_MAX];
     bool     is_dir;
-    int      hw_idx;        /* index into v9p_hw_files, or -1 */
+    int      hw_idx;        /* index into plat_hw_files, or -1 */
     FILE    *fp;
     DIR     *dp;
     uint64_t dir_pos;       /* cookie of the next entry readdir will return */
@@ -235,10 +205,6 @@ typedef struct {
     uint32_t snap_len;
 } v9p_fid;
 
-/* Opened once at init purely so Tstatfs can ask for free bytes without
-   paying for an archive open on every call. */
-static FS_Archive v9p_sdmc_archive;
-static bool       v9p_sdmc_ok;
 
 static struct {
     uint32_t dev_feat_sel, drv_feat_sel;
@@ -342,15 +308,15 @@ static uint8_t rd8(v9p_rd *r) {
 }
 static uint16_t rd16(v9p_rd *r) {
     if (r->pos + 2 > r->len) { r->err = true; return 0; }
-    uint16_t v; memcpy(&v, r->b + r->pos, 2); r->pos += 2; return v;
+    uint16_t v; v = g_ld16(r->b + r->pos); r->pos += 2; return v;
 }
 static uint32_t rd32(v9p_rd *r) {
     if (r->pos + 4 > r->len) { r->err = true; return 0; }
-    uint32_t v; memcpy(&v, r->b + r->pos, 4); r->pos += 4; return v;
+    uint32_t v; v = g_ld32(r->b + r->pos); r->pos += 4; return v;
 }
 static uint64_t rd64(v9p_rd *r) {
     if (r->pos + 8 > r->len) { r->err = true; return 0; }
-    uint64_t v; memcpy(&v, r->b + r->pos, 8); r->pos += 8; return v;
+    uint64_t v; v = g_ld64(r->b + r->pos); r->pos += 8; return v;
 }
 static void rdstr(v9p_rd *r, char *out, size_t outsz) {
     uint16_t n = rd16(r);
@@ -367,15 +333,15 @@ static void wr8(v9p_wr *w, uint8_t v) {
 }
 static void wr16(v9p_wr *w, uint16_t v) {
     if (w->len + 2 > w->cap) { w->ovf = true; return; }
-    memcpy(w->b + w->len, &v, 2); w->len += 2;
+    g_st16(w->b + w->len, v); w->len += 2;
 }
 static void wr32(v9p_wr *w, uint32_t v) {
     if (w->len + 4 > w->cap) { w->ovf = true; return; }
-    memcpy(w->b + w->len, &v, 4); w->len += 4;
+    g_st32(w->b + w->len, v); w->len += 4;
 }
 static void wr64(v9p_wr *w, uint64_t v) {
     if (w->len + 8 > w->cap) { w->ovf = true; return; }
-    memcpy(w->b + w->len, &v, 8); w->len += 8;
+    g_st64(w->b + w->len, v); w->len += 8;
 }
 static void wrbytes(v9p_wr *w, const void *p, uint32_t n) {
     if (w->len + n > w->cap) { w->ovf = true; return; }
@@ -402,7 +368,7 @@ static void v9p_begin(v9p_wr *w, uint8_t type, uint16_t tag) {
 }
 static uint32_t v9p_finish(v9p_wr *w) {
     uint32_t sz = w->len;
-    memcpy(w->b, &sz, 4);
+    g_st32(w->b, sz);
     return sz;
 }
 static uint32_t v9p_error(v9p_wr *w, uint16_t tag, uint32_t ecode) {
@@ -427,7 +393,7 @@ static bool v9p_stat_path(v9p_fid *e, struct stat *st) {
             st->st_mode = S_IFDIR | 0555;
             st->st_nlink = 2;
         } else {
-            st->st_mode = S_IFREG | v9p_hw_files[e->hw_idx].perm;
+            st->st_mode = S_IFREG | plat_hw_files[e->hw_idx].perm;
             st->st_nlink = 1;
             /* Synthetic files have no meaningful length until they're read;
                claiming a fixed size would make `cat` stop early or pad with
@@ -448,7 +414,7 @@ static uint8_t v9p_qid_type(const struct stat *st) {
  * ------------------------------------------------------------------ */
 
 static uint32_t v9p_hw_open(v9p_fid *e) {
-    const v9p_hw_ent *h = &v9p_hw_files[e->hw_idx];
+    const plat_hw_ent *h = &plat_hw_files[e->hw_idx];
 
     if (h->rd_text) {
         /* Snapshot at open so that a multi-read `cat` sees one coherent
@@ -468,19 +434,11 @@ static uint32_t v9p_hw_open(v9p_fid *e) {
     if (h->stream == HWS_CAM_OUT || h->stream == HWS_CAM_IN) {
         /* One frame is grabbed per open; reads then walk that frame. The
            guest reopens to get a newer one. */
-        e->snap = (uint8_t *)malloc(HW_CAM_BYTES);
-        if (!e->snap) return L_EIO;
-        u32 sel  = (h->stream == HWS_CAM_OUT) ? SELECT_OUT1 : SELECT_IN1;
-        u32 port = PORT_CAM1;
-        int got = hw_capture_frame(sel, port, e->snap);
-        if (got <= 0) { free(e->snap); e->snap = NULL; return L_EIO; }
+        int got = plat_hw_camera(h->stream == HWS_CAM_IN, &e->snap);
+        if (got <= 0) { e->snap = NULL; return L_EIO; }
         e->snap_len = (uint32_t)got;
         return 0;
     }
-
-    /* Start capture at open rather than on the first read, so the ring has
-       had a moment to fill by the time the guest actually reads. */
-    if (h->stream == HWS_MIC) hw_mic_start();
 
     return 0; /* mic/audio/leds are streams - nothing to snapshot */
 }
@@ -701,7 +659,7 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
         } else if (e->tree == V9P_TREE_HW) {
             if (e->hw_idx < 0) { e->is_dir = true; }
             else {
-                const v9p_hw_ent *h = &v9p_hw_files[e->hw_idx];
+                const plat_hw_ent *h = &plat_hw_files[e->hw_idx];
                 if (wants_write && !h->wr && h->stream != HWS_AUDIO)
                     return v9p_error(&w, tag, L_EACCES);
                 if (!wants_write && !h->rd_text && h->stream != HWS_MIC &&
@@ -788,10 +746,10 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
         uint32_t got = 0;
 
         if (e->tree == V9P_TREE_HW && e->hw_idx >= 0) {
-            const v9p_hw_ent *h = &v9p_hw_files[e->hw_idx];
+            const plat_hw_ent *h = &plat_hw_files[e->hw_idx];
             if (h->stream == HWS_MIC) {
                 if (w.len + count <= w.cap)
-                    got = (uint32_t)hw_mic_read(w.b + w.len, (int)count);
+                    got = (uint32_t)plat_hw_mic_read(w.b + w.len, (int)count);
             } else if (e->snap) {
                 if (off < e->snap_len) {
                     got = e->snap_len - (uint32_t)off;
@@ -808,7 +766,7 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
         }
 
         w.len += got;
-        memcpy(w.b + 7, &got, 4);
+        g_st32(w.b + 7, got);
         return v9p_finish(&w);
     }
 
@@ -824,8 +782,8 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
 
         int done = -1;
         if (e->tree == V9P_TREE_HW && e->hw_idx >= 0) {
-            const v9p_hw_ent *h = &v9p_hw_files[e->hw_idx];
-            if (h->stream == HWS_AUDIO)  done = hw_audio_write(r.b + r.pos, (int)count);
+            const plat_hw_ent *h = &plat_hw_files[e->hw_idx];
+            if (h->stream == HWS_AUDIO)  done = plat_hw_audio_write(r.b + r.pos, (int)count);
             else if (h->wr)              done = h->wr((const char *)(r.b + r.pos), (int)count);
         } else if (e->fp) {
             if (fseek(e->fp, (long)off, SEEK_SET) == 0)
@@ -882,12 +840,12 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
             }
         } else if (e->tree == V9P_TREE_HW) {
             if (e->hw_idx >= 0) return v9p_error(&w, tag, L_ENOTDIR);
-            for (int i = -2; i < V9P_HW_COUNT; i++) {
+            for (int i = -2; i < plat_hw_count; i++) {
                 if (idx < off) { idx++; continue; }
                 const char *nm; uint8_t qt; char qpath[V9P_PATH_MAX];
                 if (i == -2)      { nm = ".";  qt = P9_QTDIR;  snprintf(qpath, sizeof(qpath), "/"); }
                 else if (i == -1) { nm = ".."; qt = P9_QTDIR;  snprintf(qpath, sizeof(qpath), "/"); }
-                else              { nm = v9p_hw_files[i].name; qt = P9_QTFILE;
+                else              { nm = plat_hw_files[i].name; qt = P9_QTFILE;
                                     snprintf(qpath, sizeof(qpath), "/%s", nm); }
                 uint32_t need = 13 + 8 + 1 + 2 + (uint32_t)strlen(nm);
                 if (w.len + need > limit) break;
@@ -948,7 +906,7 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
         }
 
         uint32_t nbytes = w.len - body_start;
-        memcpy(w.b + 7, &nbytes, 4);
+        g_st32(w.b + 7, nbytes);
         return v9p_finish(&w);
     }
 
@@ -969,13 +927,12 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
         /* Report the SD card's real free space. Not cosmetic: an all-zero
            statfs makes the mount look 0 bytes big, and anything that checks
            for room before writing (installers, package managers) then
-           refuses to write at all. Horizon exposes free bytes but not total
-           capacity, so total is reported as the free figure - understating
+           refuses to write at all. Consoles generally expose free bytes but
+           not total capacity, so total is the free figure - understating
            the disk is harmless where claiming zero is not. */
-        uint64_t freeb = 0;
-        if (e->tree == V9P_TREE_SD && v9p_sdmc_ok)
-            FSUSER_GetFreeBytes(&freeb, v9p_sdmc_archive);
-        /* Not every backend answers that query - Citra's virtual SD card
+        int64_t rep = (e->tree < V9P_TREE_COUNT) ? plat_v9p_free_bytes() : -1;
+        uint64_t freeb = (rep > 0) ? (uint64_t)rep : 0;
+        /* Not every console answers that query - an emulated SD card often
            reports nothing - and "0 bytes free" is the one answer that
            actively breaks callers. Fall back to a nominal figure so the
            filesystem always looks writable; it is a hint for `df`, not an
@@ -1170,12 +1127,12 @@ static void v9p_process_queue(uint8_t *ram) {
     if (!desc_table || !avail_ring || !used_ring) return;
 
     uint16_t avail_idx;
-    memcpy(&avail_idx, avail_ring + 2, 2);
+    avail_idx = g_ld16(avail_ring + 2);
 
     while (v9p.last_avail_idx != avail_idx) {
         uint16_t ring_pos = v9p.last_avail_idx % VQUEUE_SIZE;
         uint16_t head;
-        memcpy(&head, avail_ring + 4u + ring_pos * 2u, 2);
+        head = g_ld16(avail_ring + 4u + ring_pos * 2u);
         v9p.last_avail_idx++;
 
         /* Gather the readable half of the chain into one flat request, and
@@ -1225,14 +1182,14 @@ static void v9p_process_queue(uint8_t *ram) {
         }
 
         uint16_t used_idx_val;
-        memcpy(&used_idx_val, used_ring + 2, 2);
+        used_idx_val = g_ld16(used_ring + 2);
         uint16_t used_slot = used_idx_val % VQUEUE_SIZE;
         uint8_t *ue = used_ring + 4u + (uint32_t)used_slot * 8u;
         uint32_t hd32 = head;
-        memcpy(ue + 0, &hd32, 4);
-        memcpy(ue + 4, &rlen, 4);
+        g_st32(ue + 0, hd32);
+        g_st32(ue + 4, rlen);
         used_idx_val++;
-        memcpy(used_ring + 2, &used_idx_val, 2);
+        g_st16(used_ring + 2, used_idx_val);
 
         v9p.int_status |= 1u;
     }
@@ -1244,40 +1201,44 @@ static void v9p_process_queue(uint8_t *ram) {
  * Init + MMIO
  * ------------------------------------------------------------------ */
 
-/* The want_* flags come from the settings page and gate each tree separately,
-   since one virtio-9p channel carries all four. They short-circuit the archive
-   opens rather than closing them afterwards: an archive that was never mounted
-   needs no unmount. */
-static void v9p_init(bool want_sd, bool want_nand, bool want_twl) {
+/* `want` is a bitmask over the console's real trees, from the settings page.
+   Each is gated separately because one virtio-9p channel carries all of them.
+   A tree the user turned off is never mounted rather than mounted and closed:
+   what was never mounted needs no unmount. */
+static void v9p_init(uint32_t want) {
     memset(&v9p, 0, sizeof(v9p));
     v9p.queue_num = VQUEUE_SIZE;
     v9p.msize     = V9P_MSIZE;
 
-    hw3ds_init();
+    const plat_tree_t *pt;
+    v9p_nreal = plat_v9p_trees(&pt);
+    if (v9p_nreal > V9P_MAX_REAL) v9p_nreal = V9P_MAX_REAL;
 
-    v9p_tree_ok[V9P_TREE_ROOT] = true; /* the synthetic listing always exists */
-    v9p_tree_ok[V9P_TREE_SD] = want_sd;
-    v9p_tree_ok[V9P_TREE_HW] = true;
+    for (int i = 0; i < v9p_nreal; i++) {
+        v9p_tree_aname[i] = pt[i].aname;
+        v9p_tree_root[i]  = pt[i].root;
+        v9p_tree_ro[i]    = pt[i].ro;
+        /* A mount that fails - NAND without extended homebrew permissions, a
+           card that isn't there - leaves the tree simply absent, and the
+           guest's mount of it fails cleanly instead of the whole device
+           disappearing. */
+        v9p_tree_ok[i]    = ((want >> i) & 1u) && plat_v9p_mount(i);
+    }
 
-    /* NAND needs permissions plain homebrew doesn't get. Under Luma3DS with
-       extended homebrew perms these succeed; otherwise the trees simply
-       stay absent and an attach to them fails cleanly. */
-    FS_Path empty = { PATH_EMPTY, 1, "" };
-    v9p_sdmc_ok = want_sd &&
-        R_SUCCEEDED(FSUSER_OpenArchive(&v9p_sdmc_archive, ARCHIVE_SDMC, empty));
-    v9p_tree_ok[V9P_TREE_NAND] = want_nand &&
-        R_SUCCEEDED(archiveMount(ARCHIVE_NAND_CTR_FS, empty, "v9nand"));
-    v9p_tree_ok[V9P_TREE_TWL] = want_twl &&
-        R_SUCCEEDED(archiveMount(ARCHIVE_NAND_TWL_FS, empty, "v9twl"));
+    v9p_tree_aname[V9P_TREE_HW]   = "hw";
+    v9p_tree_root[V9P_TREE_HW]    = "/";
+    v9p_tree_ok[V9P_TREE_HW]      = true;
+
+    v9p_tree_aname[V9P_TREE_ROOT] = "/";
+    v9p_tree_root[V9P_TREE_ROOT]  = "/";
+    v9p_tree_ro[V9P_TREE_ROOT]    = true;
+    v9p_tree_ok[V9P_TREE_ROOT]    = true;
 }
 
 static void v9p_exit(void) {
     for (int i = 0; i < V9P_MAX_FIDS; i++)
         if (v9p.fids[i].used) v9p_fid_free(&v9p.fids[i]);
-    if (v9p_tree_ok[V9P_TREE_NAND]) archiveUnmount("v9nand");
-    if (v9p_tree_ok[V9P_TREE_TWL])  archiveUnmount("v9twl");
-    if (v9p_sdmc_ok) { FSUSER_CloseArchive(v9p_sdmc_archive); v9p_sdmc_ok = false; }
-    hw3ds_exit();
+    plat_v9p_unmount_all();
 }
 
 /* Config space: tag_len[2] then the tag bytes. The driver reads the length

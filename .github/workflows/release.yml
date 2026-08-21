@@ -252,6 +252,13 @@ jobs:
           name: switch-homebrew
           path: release/nx/
 
+      # upload-artifact strips the longest common prefix of the paths it was
+      # given, so the layout inside an artifact is not the layout that was
+      # uploaded. Print it: a mismatch here is otherwise a cp failure fifty
+      # lines later with no clue why.
+      - name: Show downloaded layout
+        run: find release -type f | sort
+
       # The dispatch inputs are optional, so fall back to the commit-derived
       # tag and title when they are left blank.
       - name: Set release variables
@@ -281,10 +288,10 @@ jobs:
           cd release
           mkdir -p out/3ds out/wiiu out/wii out/gamecube out/switch
           cp 3ds-cli.3dsx 3ds-cli.cia   out/3ds/
-          cp ppc/dist/wiiu/3ds-cli.rpx ppc/dist/wiiu/3ds-cli.wuhb out/wiiu/
-          cp ppc/dist/wii/3ds-cli.dol   out/wii/
-          cp ppc/dist/cube/3ds-cli.dol  out/gamecube/
-          cp nx/dist/switch/3ds-cli.nro out/switch/
+          cp ppc/wiiu/3ds-cli.rpx ppc/wiiu/3ds-cli.wuhb out/wiiu/
+          cp ppc/wii/3ds-cli.dol   out/wii/
+          cp ppc/cube/3ds-cli.dol  out/gamecube/
+          cp nx/3ds-cli.nro        out/switch/
           cp Image                      out/
           cat > out/README_sdcard.txt <<'TXT'
           3DS-CLI - RISC-V Linux on Nintendo consoles.
@@ -312,9 +319,9 @@ jobs:
       # straight at a release asset.
       - name: Build store packages
         run: |
-          cp -r release/ppc/dist dist
+          cp -r release/ppc dist
           mkdir -p dist/switch
-          cp release/nx/dist/switch/3ds-cli.nro dist/switch/
+          cp release/nx/3ds-cli.nro dist/switch/
           VERSION="${{ steps.vars.outputs.tag }}" tools/package.sh release/Image
 
       - name: Create release

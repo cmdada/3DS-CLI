@@ -39,7 +39,8 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(MACHDEP)
 LDFLAGS	=	-g $(MACHDEP) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lz -lwut -lm
+# curl is only for fetching a missing Image - see source/core/download.h.
+LIBS	:=	-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lbrotlidec -lbrotlicommon -lz -lwut -lm
 
 LIBDIRS	:=	$(PORTLIBS) $(WUT_ROOT)
 

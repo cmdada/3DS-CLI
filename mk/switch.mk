@@ -39,7 +39,10 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lz -lnx -lm
+# curl is only for fetching a missing Image - see source/core/download.h.
+# No mbedtls here, unlike the other two: switch-curl is built against
+# libnx's own SSL service, so libnx is the TLS backend.
+LIBS	:=	-lcurl -lz -lnx -lm
 LIBDIRS	:=	$(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------

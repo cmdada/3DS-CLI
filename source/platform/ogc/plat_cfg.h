@@ -34,6 +34,10 @@
 #define PLAT_SOCK_OGC
 #endif
 
+/* No PLAT_HAS_DOWNLOAD on either console: GitHub is HTTPS-only and devkitPro
+   ships no TLS for libogc, so a missing Image stays an error to fix on a PC.
+   See source/core/download.h. */
+
 /* Both consoles are single core, so the emulator is stepped inline and there
    is no thread to give it. */
 #define PLAT_MUTEX_SIZE  8

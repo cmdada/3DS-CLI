@@ -122,6 +122,9 @@ jobs:
         with:
           submodules: true
 
+      - name: Install curl for ARM
+        run: dkp-pacman -S --noconfirm --needed 3ds-curl
+
       - name: Install CIA build tools
         run: |
           apt-get update && apt-get install -y wget build-essential zip unzip git cmake
@@ -171,8 +174,11 @@ jobs:
           apt-get update && apt-get install -y -qq device-tree-compiler python3
           python3 tools/gen_dtb.py
 
-      - name: Install zlib for PowerPC
-        run: dkp-pacman -S --noconfirm --needed ppc-zlib
+      # curl only matters to the Wii U build - see source/core/download.h -
+      # but this job is also where the Wii and GameCube are built, and they
+      # link neither.
+      - name: Install zlib and curl for PowerPC
+        run: dkp-pacman -S --noconfirm --needed ppc-zlib wiiu-curl
 
       - name: Build Wii U, Wii and GameCube
         run: make wiiu && make wii && make gamecube
@@ -205,8 +211,8 @@ jobs:
           apt-get update && apt-get install -y -qq device-tree-compiler python3
           python3 tools/gen_dtb.py
 
-      - name: Install zlib for AArch64
-        run: dkp-pacman -S --noconfirm --needed switch-zlib
+      - name: Install zlib and curl for AArch64
+        run: dkp-pacman -S --noconfirm --needed switch-zlib switch-curl
 
       - name: Build NRO
         run: make switch
@@ -332,6 +338,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             3ds_cli.zip
+            release/Image
             dist/packages/oscwii-3ds-cli.zip
             dist/packages/hbas-wiiu-3ds-cli.zip
             dist/packages/hbas-switch-3ds-cli.zip
@@ -350,6 +357,10 @@ jobs:
             | Switch | `switch/3ds-cli.nro` | `sdmc:/switch/` |
             | Wii | `wii/3ds-cli.dol` | `sd:/apps/3ds-cli/boot.dol` |
             | GameCube | `gamecube/3ds-cli.dol` | SD Gecko / SD2SP2 |
+
+            On the 3DS, Wii U and Switch you can skip the `Image` step: launch
+            the app with none on the card and it offers to download this
+            release's over WiFi.
 
             The Image has the root filesystem bundled in: on first boot the app
             unpacks it to `rootfs.ext2` on the card, which stays as the writable

@@ -33,6 +33,10 @@ that's everything. First boot is slower because it unpacks `rootfs.ext2` to
 the card, which is the writable disk from then on. Log in as `root` with a
 blank password.
 
+On the 3DS, Wii U and Switch you can copy just the binary and skip `Image`:
+launched with none on the card, the app offers to download the latest
+release's over WiFi. The Wii and GameCube have no TLS stack to do that with.
+
 | Console | Binary | Goes to |
 |---|---|---|
 | 3DS | `3ds/3ds-cli.3dsx` | `sdmc:/3ds/3ds-cli/` |

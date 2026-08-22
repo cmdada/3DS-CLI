@@ -10,6 +10,7 @@
 #include "theme.h"    /* the adabit palette, shared by the terminal and the UI */
 #include "config.h"   /* <SD>/3ds-cli.cfg                                      */
 #include "ui.h"       /* bottom-screen drawing primitives                     */
+#include "download.h" /* fetching a missing Image from the GitHub release      */
 
 TermState term_state;
 
@@ -267,6 +268,114 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
   PresentTopScreen(present_tick);
   return true;
 }
+
+#ifdef PLAT_HAS_DOWNLOAD
+
+/* What a RISC-V Linux Image says it is: "RISCV" at 0x30 on 4.15+, and the
+   0x38 magic2 that superseded it in 5.5. With no certificate checking on the
+   download (see download.h), this is what keeps a captive portal's login page
+   - or a transfer that ended early on a 200 - from being kept as `Image` and
+   failing much later as an illegal instruction with nothing to point at. */
+static bool LooksLikeKernelImage(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  uint8_t hdr[64];
+  bool ok = fread(hdr, sizeof(hdr), 1, f) == 1 &&
+            (memcmp(hdr + 0x38, "RSC\x05", 4) == 0 ||
+             memcmp(hdr + 0x30, "RISCV", 5) == 0);
+  fclose(f);
+  return ok;
+}
+
+typedef struct {
+  uint64_t *present_tick;
+  uint32_t  last_mb;
+} DlUi;
+
+/* Progress in the same shape as the first-boot rootfs extraction - a line
+   every few MB, not a bar, because the terminal is the only surface there is
+   this early. It doubles as the input poll: curl blocks for the whole
+   transfer, so this is the app's only chance to repaint, to see B, or to
+   notice the OS asking it to go away. */
+static bool DownloadProgress(uint64_t got, uint64_t total, void *ctx) {
+  DlUi *ui = (DlUi *)ctx;
+  if (!plat_running()) return false;
+
+  plat_input_t in;
+  plat_poll_input(&in);
+  if (in.down & (PLAT_BTN_B | PLAT_BTN_QUIT)) return false;
+
+  uint32_t mb = (uint32_t)(got >> 20);
+  if (mb >= ui->last_mb + 4) {
+    ui->last_mb = mb;
+    if (total)
+      term_printf("  ... %luMB / %luMB\n", (unsigned long)mb,
+                  (unsigned long)(total >> 20));
+    else
+      term_printf("  ... %luMB\n", (unsigned long)mb);
+    PresentTopScreen(ui->present_tick);
+  }
+  return true;
+}
+
+/* Offered when the card has no Image: without one there is nothing to boot,
+   and the alternative is an error telling the user to go and find a PC. True
+   means an Image is now on the card and the caller should open it. */
+static bool PromptDownloadImage(uint64_t *present_tick) {
+  term_printf("No Image found on the SD card.\n");
+  term_printf("Press A to download it (~55MB) from the\n"
+              "latest release, or B to quit.\n");
+  PresentTopScreen(present_tick);
+
+  for (;;) {
+    if (!plat_running()) return false;
+    plat_input_t in;
+    plat_poll_input(&in);
+    if (in.down & PLAT_BTN_A) break;
+    if (in.down & (PLAT_BTN_B | PLAT_BTN_QUIT)) return false;
+    plat_sleep_us(g_input_poll_us);
+  }
+
+  term_printf("Bringing up the network...\n");
+  PresentTopScreen(present_tick);
+  if (!plat_net_init()) {
+    term_printf("Network unavailable.\n");
+    PresentTopScreen(present_tick);
+    return false;
+  }
+
+  term_printf("Downloading Image...\n");
+  PresentTopScreen(present_tick);
+
+  DlUi ui = { present_tick, 0 };
+  bool ok = dl_fetch(DL_IMAGE_URL, PLAT_SD "Image", DownloadProgress, &ui);
+
+  /* Handed straight back rather than kept for the guest: vnet_init brings the
+     stack up again if the guest wants networking at all, and on the 3DS the
+     SOC session holds a megabyte that the RAM walk in main() would otherwise
+     never get to offer the guest. */
+  plat_net_exit();
+
+  if (ok && !LooksLikeKernelImage(PLAT_SD "Image")) {
+    term_printf("What downloaded is not a kernel Image.\n");
+    remove(PLAT_SD "Image");
+    ok = false;
+  }
+  if (ok) term_printf("Image downloaded.\n");
+  else    term_printf("Download failed.\n");
+  PresentTopScreen(present_tick);
+  return ok;
+}
+
+#else
+
+/* No TLS on this console, so a missing Image is simply an error. */
+static inline bool PromptDownloadImage(uint64_t *present_tick) {
+  (void)present_tick;
+  return false;
+}
+
+#endif /* PLAT_HAS_DOWNLOAD */
 
 /* Backing store for the guest's swap device (/dev/vdb). Guest RAM is only
    whatever the 3DS heap could spare (8-64MB, see the malloc loop in main),
@@ -754,6 +863,7 @@ int main(int argc, char **argv) {
   /* Open kernel Image (possibly a combined kernel+rootfs bundle) */
   FILE *f = fopen(PLAT_SD "Image", "rb");
   if (!f) f = fopen("Image", "rb");
+  if (!f && PromptDownloadImage(&last_present_tick)) f = fopen(PLAT_SD "Image", "rb");
   if (!f) {
     term_printf("Error: Could not open '" PLAT_SD "Image'.\n");
     term_printf("Please copy Image to " PLAT_SD "\n");

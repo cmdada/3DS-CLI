@@ -78,7 +78,10 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lz -lctru -lm
+# curl (and the mbedtls it is built on) is only for fetching a missing
+# Image - see source/core/download.h. Link order matters: curl pulls
+# mbedtls, which pulls mbedx509, which pulls mbedcrypto.
+LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

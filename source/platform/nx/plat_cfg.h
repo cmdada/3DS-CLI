@@ -45,4 +45,9 @@
 /* This console has a network stack; see virtio_net.h. */
 #define PLAT_HAS_NET
 
+/* ...and a TLS-capable HTTP client to go with it (devkitPro's curl
+   portlib), so a card with no Image on it can be offered the download
+   in machine.c rather than just an error. */
+#define PLAT_HAS_DOWNLOAD
+
 #endif /* PLAT_CFG_H */

@@ -344,26 +344,19 @@ jobs:
             dist/packages/hbas-switch-3ds-cli.zip
           make_latest: true
           body: |
-            ## Setup
+            ## Install
 
-            One `Image` serves every console - the guest is identical, only the
-            host binary differs. Copy `Image` to the root of your SD card, then
-            the binary for your console:
+            1. Download `3ds_cli.zip` below and extract it.
+            2. Copy `Image` to the root of your SD card.
+            3. Copy your console's file from the zip:
 
-            | Console | Binary | Goes to |
+            | Console | Copy this | To here |
             |---|---|---|
             | 3DS | `3ds/3ds-cli.3dsx` | `sdmc:/3ds/3ds-cli/` |
             | Wii U | `wiiu/3ds-cli.wuhb` | `sd:/wiiu/apps/` |
             | Switch | `switch/3ds-cli.nro` | `sdmc:/switch/` |
             | Wii | `wii/3ds-cli.dol` | `sd:/apps/3ds-cli/boot.dol` |
-            | GameCube | `gamecube/3ds-cli.dol` | SD Gecko / SD2SP2 |
+            | GameCube | `gamecube/3ds-cli.dol` | anywhere Swiss can reach |
 
-            On the 3DS, Wii U and Switch you can skip the `Image` step: launch
-            the app with none on the card and it offers to download this
-            release's over WiFi.
-
-            The Image has the root filesystem bundled in: on first boot the app
-            unpacks it to `rootfs.ext2` on the card, which stays as the writable
-            disk from then on - changes persist across sessions.
-            Includes: bash, htop, neofetch, nano, vim, tree, wget, dropbear,
-            procps, util-linux.
+            That's it. The other zips below are for the Open Shop Channel and
+            the Homebrew App Store to install from, not for copying by hand.

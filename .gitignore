@@ -5,6 +5,7 @@ build-switch/
 build-wii/
 build-gamecube/
 build-psp/
+build-vita/
 dist/
 *.3dsx
 *.smdh

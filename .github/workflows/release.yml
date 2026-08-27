@@ -254,10 +254,52 @@ jobs:
           path: dist/psp/EBOOT.PBP
           retention-days: 1
 
+  # ── VitaSDK: PS Vita (.vpk) ───────────────────────────────────────────────
+  vita:
+    name: Build Vita homebrew
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Regenerate DTB header
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends python3 device-tree-compiler
+          python3 tools/gen_dtb.py
+
+      # The image carries the whole series, but curl ships in two flavours and
+      # only the mbedTLS one matches the -lmbedtls line in mk/vita.mk, so name
+      # it rather than trusting whichever was baked in.
+      #
+      # The baked-in one is the OpenSSL build, and the two packages share every
+      # path without either declaring a conflict, so installing over it dies on
+      # file conflicts instead of replacing it. Remove it first - along with cpr
+      # and curlpp, which depend on it and which nothing here links.
+      - name: Install portlibs
+        run: |
+          vdpm remove --noconfirm cpr curlpp curl
+          vdpm install --noconfirm curl-mbedtls zlib
+
+      - name: Build VPK
+        run: make vita
+        env:
+          VITASDK: /usr/local/vitasdk
+
+      - name: Upload Vita artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita-homebrew
+          path: dist/vita/3ds-cli.vpk
+          retention-days: 1
+
   # ── Package and release ───────────────────────────────────────────────────
   release:
     name: Package release
-    needs: [buildroot, threeds, powerpc, switch, psp]
+    needs: [buildroot, threeds, powerpc, switch, psp, vita]
     runs-on: ubuntu-latest
 
     steps:
@@ -294,6 +336,12 @@ jobs:
           name: psp-homebrew
           path: release/psp/
 
+      - name: Download Vita artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vita-homebrew
+          path: release/vita/
+
       # upload-artifact strips the longest common prefix of the paths it was
       # given, so the layout inside an artifact is not the layout that was
       # uploaded. Print it: a mismatch here is otherwise a cp failure fifty
@@ -328,13 +376,14 @@ jobs:
       - name: Package release ZIP
         run: |
           cd release
-          mkdir -p out/3ds out/wiiu out/wii out/gamecube out/switch out/psp
+          mkdir -p out/3ds out/wiiu out/wii out/gamecube out/switch out/psp out/vita
           cp 3ds-cli.3dsx 3ds-cli.cia   out/3ds/
           cp ppc/wiiu/3ds-cli.rpx ppc/wiiu/3ds-cli.wuhb out/wiiu/
           cp ppc/wii/3ds-cli.dol   out/wii/
           cp ppc/cube/3ds-cli.dol  out/gamecube/
           cp nx/3ds-cli.nro        out/switch/
           cp psp/EBOOT.PBP         out/psp/
+          cp vita/3ds-cli.vpk      out/vita/
           cp Image                      out/
           cat > out/README_sdcard.txt <<'TXT'
           3DS-CLI - RISC-V Linux on Nintendo consoles.
@@ -353,6 +402,8 @@ jobs:
                       wii/3ds-cli.dol -> sd:/apps/3ds-cli/boot.dol
             PSP       Image -> ms0:/Image
                       psp/EBOOT.PBP -> ms0:/PSP/GAME/3ds-cli/EBOOT.PBP
+            PS Vita   Image -> ux0:/Image
+                      vita/3ds-cli.vpk - install it with VitaShell
             GameCube  needs an SD Gecko or SD2SP2 in slot A; a memory card
                       cannot hold the rootfs. Image -> carda:/Image
           TXT
@@ -396,6 +447,7 @@ jobs:
             | Switch | `switch/3ds-cli.nro` | `sdmc:/switch/` |
             | Wii | `wii/3ds-cli.dol` | `sd:/apps/3ds-cli/boot.dol` |
             | PSP | `psp/EBOOT.PBP` | `ms0:/PSP/GAME/3ds-cli/` |
+            | PS Vita | `vita/3ds-cli.vpk` | install with VitaShell |
             | GameCube | `gamecube/3ds-cli.dol` | anywhere Swiss can reach |
 
             That's it. The other zips below are for the Open Shop Channel and

@@ -2,12 +2,14 @@
 .SUFFIXES:
 #---------------------------------------------------------------------------------
 
+TOPDIR ?= $(CURDIR)
+
+ifeq ($(filter psp,$(MAKECMDGOALS)),)
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
 endif
-
-TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
+endif
 
 #---------------------------------------------------------------------------------
 # TARGET is the name of the output
@@ -190,7 +192,7 @@ export BANNER_AUDIO := $(TOPDIR)/assets/silence.wav
 export BANNER       := $(TOPDIR)/$(BUILD)/banner.bnr
 export APP_RSF      := $(TOPDIR)/assets/app.rsf
 
-.PHONY: all clean cia dtb check wiiu switch wii gamecube
+.PHONY: all clean cia dtb check wiiu switch wii gamecube psp
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
@@ -236,8 +238,9 @@ endif
 #---------------------------------------------------------------------------------
 # The other consoles. Each has its own makefile under mk/ because devkitPro
 # ships a separate rules file per platform and they cannot be included
-# together; source/core is shared, source/platform/<console> is not.
-wiiu switch wii gamecube:
+# together; source/core is shared, source/platform/<console> is not. The PSP
+# is not a devkitPro target at all - see the note at the top of mk/psp.mk.
+wiiu switch wii gamecube psp:
 	@$(MAKE) --no-print-directory -f $(CURDIR)/mk/$@.mk
 
 #---------------------------------------------------------------------------------

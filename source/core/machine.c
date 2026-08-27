@@ -1267,11 +1267,15 @@ int main(int argc, char **argv) {
       } else pan_cooldown_y = 0;
     }
 
-    // D-pad arrows
-    if (kDown & PLAT_BTN_UP)    rx_push_str("\x1b[A");
-    if (kDown & PLAT_BTN_DOWN)  rx_push_str("\x1b[B");
-    if (kDown & PLAT_BTN_RIGHT) rx_push_str("\x1b[C");
-    if (kDown & PLAT_BTN_LEFT)  rx_push_str("\x1b[D");
+    /* D-pad arrows, but only where something else can drive the panel
+       keyboard. With no pointer at all (GameCube, PSP) the d-pad is how the
+       keyboard's focus moves. */
+    if (plat_caps()->pointer) {
+      if (kDown & PLAT_BTN_UP)    rx_push_str("\x1b[A");
+      if (kDown & PLAT_BTN_DOWN)  rx_push_str("\x1b[B");
+      if (kDown & PLAT_BTN_RIGHT) rx_push_str("\x1b[C");
+      if (kDown & PLAT_BTN_LEFT)  rx_push_str("\x1b[D");
+    }
 
     pkbd_update(&in);
     pkbd_draw();

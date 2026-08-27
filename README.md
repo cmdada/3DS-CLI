@@ -1,7 +1,7 @@
 # 3DS-CLI [![Release](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml/badge.svg)](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml) [![Downloads](https://img.shields.io/github/downloads/cmdada/3ds-cli/total.svg)](https://github.com/cmdada/3DS-CLI/releases)
 
-Run real RISC-V Linux on a Nintendo console: 3DS, Wii U, Switch, Wii or
-GameCube.
+Run real RISC-V Linux on various consoles: Nintendo's 3DS, Wii U, Switch, Wii
+and GameCube, and Sony's PSP.
 
 3DS-CLI boots a stock RV32 Linux 6.6 kernel with a glibc userspace off your SD
 card, using [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), mini-rv32ima with a full Sv32 MMU, S-mode and a built-in SBI,
@@ -18,9 +18,9 @@ running as ordinary homebrew.
 - The guest gets real hardware: SD card, NAND, battery, sensors, sliders,
   cameras, mic, speakers.
 - Comes with bash, vim, nano, htop, tree, wget, dropbear, BusyBox.
-- Runs on Old 3DS and New 3DS, and on the Wii U, Switch, Wii and GameCube.
-  One `Image` boots on all of them, because the guest is identical and only
-  the host binary differs.
+- Runs on Old 3DS and New 3DS, and on the Wii U, Switch, Wii, GameCube and
+  PSP. One `Image` boots on all of them, because the guest is identical and
+  only the host binary differs.
 
 ## Install
 
@@ -33,8 +33,8 @@ that's everything. First boot is slower because it unpacks `rootfs.ext2` to
 the card, which is the writable disk from then on. Log in as `root` with a
 blank password.
 
-On the 3DS, Wii U and Switch you can copy just the binary and skip `Image`:
-launched with none on the card, the app offers to download the latest
+On the 3DS, Wii U, Switch and PSP you can copy just the binary and skip
+`Image`: launched with none on the card, the app offers to download the latest
 release's over WiFi. The Wii and GameCube have no TLS stack to do that with.
 
 | Console | Binary | Goes to |
@@ -44,6 +44,7 @@ release's over WiFi. The Wii and GameCube have no TLS stack to do that with.
 | Switch | `switch/3ds-cli.nro` | `sdmc:/switch/` |
 | Wii | `wii/3ds-cli.dol` | `sd:/apps/3ds-cli/boot.dol` |
 | GameCube | `gamecube/3ds-cli.dol` | an SD Gecko or SD2SP2 |
+| PSP | `psp/EBOOT.PBP` | `ms0:/PSP/GAME/3ds-cli/` |
 
 The GameCube needs an SD Gecko or SD2SP2: the rootfs is ~200MB and a memory
 card cannot hold it. It also has the least RAM of the five, so it is the
@@ -58,6 +59,7 @@ tightest fit.
 | Switch | 512MB | one, split | touchscreen | yes |
 | Wii | 48MB | one, split | Wiimote IR | yes |
 | GameCube | 20MB | one, split | none, D-pad focus | no |
+| PSP | 20-48MB | one, split | none, D-pad focus | yes |
 
 ## Controls
 
@@ -141,12 +143,16 @@ The emulator core and the touch keyboard are submodules, so clone with them:
 git clone --recursive https://github.com/cmdada/3DS-CLI
 ```
 
-Each console needs its own devkitPro toolchain, and all five need zlib:
+The five Nintendo consoles each need their own devkitPro toolchain, and all
+of them need zlib:
 
 ```sh
 dkp-pacman -S 3ds-dev wiiu-dev switch-dev wii-dev gamecube-dev
 dkp-pacman -S 3ds-zlib ppc-zlib switch-zlib
 ```
+
+The PSP is not a devkitPro target: i used [pspdev](https://github.com/pspdev/pspdev), Its `bin/` has to be on
+`PATH` so `psp-config` is found.
 
 ```sh
 make            # 3ds-cli.3dsx
@@ -155,6 +161,7 @@ make wiiu       # dist/wiiu/3ds-cli.rpx and .wuhb
 make switch     # dist/switch/3ds-cli.nro
 make wii        # dist/wii/3ds-cli.dol
 make gamecube   # dist/cube/3ds-cli.dol
+make psp        # dist/psp/EBOOT.PBP
 make dtb        # regenerate the device tree after editing source/3ds-cli.dts
 ```
 
@@ -178,7 +185,7 @@ cd .. && python3 tools/mkimage.py out/images/Image out/images/rootfs.ext4 Image
 ```
 
 Nothing under `buildroot/` is console-specific: the same kernel and rootfs
-boot on all five, and the guest learns its terminal size from
+boot on all six, and the guest learns its terminal size from
 `/mnt/3ds/hw/console_size`. Kernel config is
 `buildroot/board/3ds-cli/linux.config`. Packages are in
 `buildroot/configs/3ds_defconfig`. You can also just put a plain kernel `Image`
@@ -187,9 +194,9 @@ and a separate `rootfs.ext2` on the SD card, which is easier while iterating.
 
 ## Credits
 
-- Built with [devkitARM / libctru](https://github.com/devkitPro/libctru)
-- Powered by [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), a
-  fork of [mini-rv32ima](https://github.com/cnlohr/mini-rv32ima) by cnlohr
+- Built with [devkitARM / libctru](https://github.com/devkitPro/libctru), and
+  with [pspdev](https://github.com/pspdev/pspdev) for the PSP
+- Powered by [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu)
 - Bottom-screen keyboard is [ctr-osk-rt](https://github.com/cmdada/ctr-osk-rt),
   which started life in this repo and is now usable in any 3DS homebrew
 

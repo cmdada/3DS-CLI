@@ -224,10 +224,40 @@ jobs:
           path: dist/switch/3ds-cli.nro
           retention-days: 1
 
+  # ── pspdev: PSP (EBOOT.PBP) ───────────────────────────────────────────────
+  # I may later make my own pspdev gh action :/ I don't love this one
+  psp:
+    name: Build PSP homebrew
+    runs-on: ubuntu-latest
+    container: ghcr.io/pspdev/pspdev:latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Regenerate DTB header
+        run: |
+          apk add --no-cache python3 dtc
+          python3 tools/gen_dtb.py
+
+      # zlib, curl and mbedTLS all ship in the pspdev image already, so
+      # unlike the devkitPro jobs there is no portlib to install here.
+      - name: Build EBOOT
+        run: make psp
+
+      - name: Upload PSP artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: psp-homebrew
+          path: dist/psp/EBOOT.PBP
+          retention-days: 1
+
   # ── Package and release ───────────────────────────────────────────────────
   release:
     name: Package release
-    needs: [buildroot, threeds, powerpc, switch]
+    needs: [buildroot, threeds, powerpc, switch, psp]
     runs-on: ubuntu-latest
 
     steps:
@@ -257,6 +287,12 @@ jobs:
         with:
           name: switch-homebrew
           path: release/nx/
+
+      - name: Download PSP artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: psp-homebrew
+          path: release/psp/
 
       # upload-artifact strips the longest common prefix of the paths it was
       # given, so the layout inside an artifact is not the layout that was
@@ -292,12 +328,13 @@ jobs:
       - name: Package release ZIP
         run: |
           cd release
-          mkdir -p out/3ds out/wiiu out/wii out/gamecube out/switch
+          mkdir -p out/3ds out/wiiu out/wii out/gamecube out/switch out/psp
           cp 3ds-cli.3dsx 3ds-cli.cia   out/3ds/
           cp ppc/wiiu/3ds-cli.rpx ppc/wiiu/3ds-cli.wuhb out/wiiu/
           cp ppc/wii/3ds-cli.dol   out/wii/
           cp ppc/cube/3ds-cli.dol  out/gamecube/
           cp nx/3ds-cli.nro        out/switch/
+          cp psp/EBOOT.PBP         out/psp/
           cp Image                      out/
           cat > out/README_sdcard.txt <<'TXT'
           3DS-CLI - RISC-V Linux on Nintendo consoles.
@@ -314,6 +351,8 @@ jobs:
                       switch/3ds-cli.nro -> sdmc:/switch/3ds-cli.nro
             Wii       Image -> sd:/Image
                       wii/3ds-cli.dol -> sd:/apps/3ds-cli/boot.dol
+            PSP       Image -> ms0:/Image
+                      psp/EBOOT.PBP -> ms0:/PSP/GAME/3ds-cli/EBOOT.PBP
             GameCube  needs an SD Gecko or SD2SP2 in slot A; a memory card
                       cannot hold the rootfs. Image -> carda:/Image
           TXT
@@ -356,6 +395,7 @@ jobs:
             | Wii U | `wiiu/3ds-cli.wuhb` | `sd:/wiiu/apps/` |
             | Switch | `switch/3ds-cli.nro` | `sdmc:/switch/` |
             | Wii | `wii/3ds-cli.dol` | `sd:/apps/3ds-cli/boot.dol` |
+            | PSP | `psp/EBOOT.PBP` | `ms0:/PSP/GAME/3ds-cli/` |
             | GameCube | `gamecube/3ds-cli.dol` | anywhere Swiss can reach |
 
             That's it. The other zips below are for the Open Shop Channel and

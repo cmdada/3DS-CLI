@@ -1,4 +1,5 @@
-# 3DS-CLI [![Release](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml/badge.svg)](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml) [![Downloads](https://img.shields.io/github/downloads/cmdada/3ds-cli/total.svg)](https://github.com/cmdada/3DS-CLI/releases)
+# 3DS-CLI [![Release](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml/badge.svg)](https://github.com/cmdada/3DS-CLI/actions/workflows/release.yml) [![Downloads](https://img.shields.io/github/downloads/cmdada/3ds-cli/total.svg)](https://github.com/cmdada/3DS-CLI/releases) <a href="https://db.universal-team.net/3ds/3ds-cli"><img src="https://gitlab.com/gitbrew/GitHub3DS/-/raw/main/files/images/Universal_Updater.svg" alt="UU" height="20"></a>
+
 
 Run real RISC-V Linux on various consoles: Nintendo's 3DS, Wii U, Switch, Wii
 and GameCube, and Sony's PSP.

@@ -4,7 +4,7 @@
 
 TOPDIR ?= $(CURDIR)
 
-ifeq ($(filter psp vita,$(MAKECMDGOALS)),)
+ifeq ($(filter psp vita ps3,$(MAKECMDGOALS)),)
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
 endif
@@ -192,7 +192,7 @@ export BANNER_AUDIO := $(TOPDIR)/assets/silence.wav
 export BANNER       := $(TOPDIR)/$(BUILD)/banner.bnr
 export APP_RSF      := $(TOPDIR)/assets/app.rsf
 
-.PHONY: all clean cia dtb check wiiu switch wii gamecube psp vita
+.PHONY: all clean cia dtb check wiiu switch wii gamecube psp vita ps3
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
@@ -241,7 +241,7 @@ endif
 # together; source/core is shared, source/platform/<console> is not. The PSP
 # and the Vita are not devkitPro targets at all - see the note at the top of
 # mk/psp.mk and mk/vita.mk.
-wiiu switch wii gamecube psp vita:
+wiiu switch wii gamecube psp vita ps3:
 	@$(MAKE) --no-print-directory -f $(CURDIR)/mk/$@.mk
 
 #---------------------------------------------------------------------------------

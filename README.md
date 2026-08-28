@@ -2,7 +2,7 @@
 
 
 Run real RISC-V Linux on various consoles: Nintendo's 3DS, Wii U, Switch, Wii
-and GameCube, and Sony's PSP and PS Vita.
+and GameCube, and Sony's PSP, PS Vita and PS3.
 
 3DS-CLI boots a stock RV32 Linux 6.6 kernel with a glibc userspace off your SD
 card, using [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), mini-rv32ima with a full Sv32 MMU, S-mode and a built-in SBI,
@@ -19,9 +19,9 @@ running as ordinary homebrew.
 - The guest gets real hardware: SD card, NAND, battery, sensors, sliders,
   cameras, mic, speakers.
 - Comes with bash, vim, nano, htop, tree, wget, dropbear, BusyBox.
-- Runs on Old 3DS and New 3DS, and on the Wii U, Switch, Wii, GameCube, PSP
-  and Vita. One `Image` boots on all of them, because the guest is identical
-  and only the host binary differs.
+- Runs on Old 3DS and New 3DS, and on the Wii U, Switch, Wii, GameCube, PSP,
+  Vita and PS3. One `Image` boots on all of them, because the guest is
+  identical and only the host binary differs.
 
 ## Install
 
@@ -36,7 +36,8 @@ blank password.
 
 On the 3DS, Wii U, Switch, PSP and Vita you can copy just the binary and skip
 `Image`: launched with none on the card, the app offers to download the latest
-release's over WiFi. The Wii and GameCube have no TLS stack to do that with.
+release's over WiFi. The Wii, GameCube and PS3 have no TLS stack to do that
+with.
 
 | Console | Binary | Goes to |
 |---|---|---|
@@ -47,10 +48,17 @@ release's over WiFi. The Wii and GameCube have no TLS stack to do that with.
 | GameCube | `gamecube/3ds-cli.dol` | an SD Gecko or SD2SP2 |
 | PSP | `psp/EBOOT.PBP` | `ms0:/PSP/GAME/3ds-cli/` |
 | PS Vita | `vita/3ds-cli.vpk` | install with VitaShell, then `Image` to `ux0:/` |
+| PS3 | `ps3/3ds-cli.pkg` | install from the XMB, then `Image` to `/dev_hdd0/3ds-cli/` |
 
 The GameCube needs an SD Gecko or SD2SP2: the rootfs is ~200MB and a memory
-card cannot hold it. It also has the least RAM of the five, so it is the
+card cannot hold it. It also has the least RAM of them all, so it is the
 tightest fit.
+
+The PS3 is the one console here with no removable card: its files live on the
+internal drive under `/dev_hdd0/3ds-cli/`, which is easiest to fill over FTP.
+It needs a display that can do 720p, because that is the only mode the terminal
+is laid out for. There is a `ps3/3ds-cli.self` in the release too, for loaders
+that want one instead of the `.pkg`.
 
 ### What each console gives the guest
 
@@ -63,6 +71,7 @@ tightest fit.
 | GameCube | 20MB | one, split | none, D-pad focus | no |
 | PSP | 20-48MB | one, split | none, D-pad focus | yes |
 | PS Vita | 192MB | one, split | touchscreen | yes |
+| PS3 | 128MB | one, split | none, D-pad focus | yes |
 
 ## Controls
 

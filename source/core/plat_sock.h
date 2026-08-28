@@ -7,6 +7,11 @@
  * so this header is a passthrough there. libogc is the exception: its stack
  * prefixes every call net_* and has no fcntl on sockets, so the Wii and
  * GameCube backend defines PLAT_SOCK_OGC and the mapping below applies.
+ *
+ * PSL1GHT sits between the two: it declares the BSD names, but its sockets
+ * are lv2 descriptors rather than newlib ones, so close() will not close one
+ * and there is no fcntl to make one non-blocking. PLAT_SOCK_PS3 covers just
+ * those two.
  */
 
 #ifdef PLAT_SOCK_OGC
@@ -32,6 +37,25 @@
 #define PLAT_SOCK_SET_NONBLOCK(fd) do {                 \
     u32 _nb = 1;                                        \
     net_ioctl((fd), FIONBIO, &_nb);                     \
+  } while (0)
+
+#elif defined(PLAT_SOCK_PS3)
+
+/* net/net.h pulls in net/socket.h, net/select.h and netinet/in.h, which is
+   where the BSD declarations and the AF_/SO_ constants live. Note that the
+   constants are lv2's own values, not Linux's - SOL_SOCKET is 0xFFFF here -
+   so nothing may hardcode them. */
+#include <net/net.h>
+#include <arpa/inet.h>
+
+/* An lv2 socket is not a newlib descriptor; close() would leak it. */
+#define closesocket(fd)         netClose(fd)
+
+/* No fcntl on sockets. SO_NBIO is lv2's dedicated non-blocking option and
+   takes an int, same shape as any other setsockopt. */
+#define PLAT_SOCK_SET_NONBLOCK(fd) do {                 \
+    int _nb = 1;                                        \
+    setsockopt((fd), SOL_SOCKET, SO_NBIO, &_nb, sizeof(_nb)); \
   } while (0)
 
 #else

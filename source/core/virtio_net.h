@@ -487,7 +487,14 @@ static void tcp_poll(void) {
        guest's ARP already resolves it) with a rotating ephemeral port. */
     if (ssh_listen_fd >= 0) {
         for (;;) {
-            int afd = accept(ssh_listen_fd, NULL, NULL);
+            /* Real storage rather than the NULL/NULL POSIX allows: wut's
+               socket layer dereferences the length unconditionally, so on the
+               Wii U this took the app down on the first poll after the network
+               came up - which read as the guest crashing at boot. Nothing here
+               wants the peer address; it is written and ignored. */
+            struct sockaddr_in peer;
+            socklen_t peerlen = sizeof(peer);
+            int afd = accept(ssh_listen_fd, (struct sockaddr *)&peer, &peerlen);
             if (afd < 0) break;
             int slot = -1;
             for (int i = 0; i < TCP_MAX_CONNS; i++)

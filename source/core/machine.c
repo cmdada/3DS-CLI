@@ -105,6 +105,24 @@ void rx_push_str(const char *s) { while (*s) rx_push(*s++); }
 
 static uint32_t uart_byte_count = 0;
 static FILE *uart_log_file = NULL; // <SD>/3ds-cli-console.log mirror of guest console output
+
+/* newlib gives a stream its buffer lazily, on the first read or write, and
+   sizes it by fstat()ing the descriptor. Neither half of that is wanted here.
+   The size it picks is a guess with nothing to do with how an SD card likes to
+   be written, and the log below is filled a byte at a time by fputc, so the
+   buffer is exactly what decides how many card writes a boot costs. The fstat
+   is worse: on the Wii U it goes through wut's FSA layer, and the first byte
+   of guest console output took Cemu down inside __wut_fsa_fstat - a crash that
+   only appeared once there was an Image to boot, because without one the guest
+   never prints. Handing each stream its buffer up front settles both. */
+#define LOG_BUF_SIZE 4096
+static char uart_log_buf[LOG_BUF_SIZE];
+static char dbg_log_buf[LOG_BUF_SIZE];
+
+static void SetStreamBuffer(FILE *f, char *buf, size_t len) {
+  /* Must precede any I/O on the stream, or newlib has already made one. */
+  if (f) setvbuf(f, buf, _IOFBF, len);
+}
 static void WriteUARTByte(char c) {
   uart_byte_count++;
   plat_mutex_lock(&ui_lock);
@@ -1102,6 +1120,10 @@ int main(int argc, char **argv) {
 
   if (!dbg_log_file) dbg_log_file = fopen("3ds-cli-debug.log", "w");
   uart_log_file = fopen(PLAT_SD "3ds-cli-console.log", "w");
+
+  /* Before the first fprintf or fputc below - see SetStreamBuffer. */
+  SetStreamBuffer(dbg_log_file, dbg_log_buf, sizeof(dbg_log_buf));
+  SetStreamBuffer(uart_log_file, uart_log_buf, sizeof(uart_log_buf));
 
   if (dbg_log_file) {
     fprintf(dbg_log_file, "[host] vnet soc_ready=%d\n", (int)vnet.soc_ready);

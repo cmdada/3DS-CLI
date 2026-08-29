@@ -22,6 +22,7 @@
 #ifdef HW_RVL
 #include <wiiuse/wpad.h>
 #include <network.h>
+#include <wiikeyboard/keyboard.h>
 #endif
 
 #include "plat.h"
@@ -124,6 +125,11 @@ bool plat_init(void) {
   WPAD_Init();
   WPAD_SetDataFormat(WPAD_CHAN_0, WPAD_FMT_BTNS_ACC_IR);
   WPAD_SetVRes(WPAD_CHAN_0, OGC_SCREEN_W, OGC_SCREEN_H);
+  /* A USB keyboard in either of the Wii's ports. KEYBOARD_Init takes a
+     callback that hands over already-translated characters, but it fires from
+     libogc's own thread; polling KEYBOARD_GetEvent instead keeps every push
+     into the ring on the thread core expects. */
+  KEYBOARD_Init(NULL);
 #endif
 
   /* libfat mounts whatever it finds; PLAT_SD names the device this console
@@ -255,6 +261,85 @@ void plat_poll_input(plat_input_t *out) {
   was_down = pressed;
 #endif
 }
+
+/* ------------------------------------------------------------- keyboard -- */
+
+#ifdef HW_RVL
+
+/* libogc hands over a wscons keysym with shift already applied, so most of
+   what hid_ascii.h does is done for us; only ctrl folding and the arrows are
+   left. The device does not repeat on its own, so that is here too. */
+#define OGC_KBD_REPEAT_DELAY_US  400000
+#define OGC_KBD_REPEAT_RATE_US    35000
+
+static u16      kbd_held_symbol;
+static u16      kbd_held_mods;
+static uint64_t kbd_repeat_at;
+
+static void ogc_kbd_emit(u16 symbol, u16 mods) {
+  if (symbol >= KS_Up && symbol <= KS_Right) {
+    static const char *const arrows[] = { "\x1b[A", "\x1b[B", "\x1b[D", "\x1b[C" };
+    rx_push_str(arrows[symbol - KS_Up]);
+    return;
+  }
+  if (symbol >= 0x80) return;
+
+  char c = (char)symbol;
+  /* Backspace arrives as 0x08; a terminal wants DEL, which is what every
+     other backend here sends for that key. */
+  if (c == 0x08) c = 0x7f;
+  if (MOD_ONESET(mods, MOD_ANYCONTROL)) {
+    if (c >= 'a' && c <= 'z')      c = (char)(c - 'a' + 1);
+    else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 1);
+    else if (c == ' ')             c = 0;
+    else if (c == '[')             c = 0x1b;
+    else if (c == '\\')            c = 0x1c;
+    else if (c == ']')             c = 0x1d;
+    else return;
+  }
+  rx_push(c);
+}
+
+void plat_poll_keyboard(void) {
+  keyboard_event ev;
+  uint64_t now = plat_us();
+
+  while (KEYBOARD_GetEvent(&ev) > 0) {
+    switch (ev.type) {
+      case KEYBOARD_CONNECTED:
+        caps.keyboard = true;
+        break;
+      case KEYBOARD_DISCONNECTED:
+        caps.keyboard = false;
+        kbd_held_symbol = 0;
+        break;
+      case KEYBOARD_PRESSED:
+        caps.keyboard = true;
+        if (!ev.symbol) break;
+        ogc_kbd_emit(ev.symbol, ev.modifiers);
+        kbd_held_symbol = ev.symbol;
+        kbd_held_mods   = ev.modifiers;
+        kbd_repeat_at   = now + OGC_KBD_REPEAT_DELAY_US;
+        break;
+      case KEYBOARD_RELEASED:
+        if (ev.symbol == kbd_held_symbol) kbd_held_symbol = 0;
+        break;
+    }
+  }
+
+  if (kbd_held_symbol && now >= kbd_repeat_at) {
+    ogc_kbd_emit(kbd_held_symbol, kbd_held_mods);
+    kbd_repeat_at = now + OGC_KBD_REPEAT_RATE_US;
+  }
+}
+
+#else
+
+/* The GameCube has no USB at all. Its keyboard controller is a pad-port
+   device libogc does not expose, so there is nothing to poll. */
+void plat_poll_keyboard(void) {}
+
+#endif
 
 /* -------------------------------------------------------------- threads -- */
 

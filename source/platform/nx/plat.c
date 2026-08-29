@@ -13,6 +13,7 @@
 #include <switch.h>
 
 #include "plat.h"
+#include "hid_ascii.h"
 
 _Static_assert(sizeof(Mutex) <= PLAT_MUTEX_SIZE, "PLAT_MUTEX_SIZE too small for Mutex");
 
@@ -73,6 +74,10 @@ bool plat_init(void) {
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   padInitializeDefault(&pad);
   hidInitializeTouchScreen();
+  /* A USB keyboard on the dock, or one paired over Bluetooth; hid reports
+     both through the same interface. Whether anything is actually there is
+     asked every frame in plat_poll_keyboard. */
+  hidInitializeKeyboard();
 
   caps.emu_thread = true;
   caps.pointer    = true;
@@ -166,6 +171,70 @@ void plat_poll_input(plat_input_t *out) {
   out->ptr_x = (int16_t)px;
   out->ptr_y = (int16_t)py;
   was_down = on_panel;
+}
+
+/* ------------------------------------------------------------- keyboard -- */
+
+/* hid reports the keyboard as a 256-bit bitmap of held usage ids rather than
+   as events, so the edges have to be found here by diffing against the last
+   frame. Auto-repeat is ours to do for the same reason - hid does not. */
+#define NX_KBD_REPEAT_DELAY_US  400000
+#define NX_KBD_REPEAT_RATE_US    35000
+
+static u64 kbd_prev[4];
+static u8  kbd_repeat_key;
+static u64 kbd_repeat_at;
+
+static void nx_kbd_emit(u8 usage, u64 mods) {
+  char buf[8];
+  const char *s = hid_term_bytes(usage,
+                                 (mods & HidKeyboardModifier_Shift)    != 0,
+                                 (mods & HidKeyboardModifier_Control)  != 0,
+                                 (mods & HidKeyboardModifier_CapsLock) != 0,
+                                 buf);
+  if (s) rx_push_str(s);
+}
+
+void plat_poll_keyboard(void) {
+  HidKeyboardState st;
+  if (hidGetKeyboardStates(&st, 1) < 1) {
+    caps.keyboard = false;
+    return;
+  }
+  /* Nothing says "a keyboard is attached" directly, so the flag follows the
+     first key ever seen: an empty report is indistinguishable from no
+     keyboard at all until someone types. */
+  u64 now = plat_us();
+
+  for (int w = 0; w < 4; w++) {
+    u64 fresh = st.keys[w] & ~kbd_prev[w];
+    while (fresh) {
+      int bit = __builtin_ctzll(fresh);
+      fresh &= fresh - 1;
+      u8 usage = (u8)(w * 64 + bit);
+      /* The modifier keys themselves are in the bitmap too and produce
+         nothing; st.modifiers is what carries their state. */
+      if (usage >= 0xE0) continue;
+      caps.keyboard = true;
+      nx_kbd_emit(usage, st.modifiers);
+      kbd_repeat_key = usage;
+      kbd_repeat_at  = now + NX_KBD_REPEAT_DELAY_US;
+    }
+  }
+
+  /* Repeat only the most recent key, and only while it is still down - the
+     same thing every OS keyboard driver does. */
+  if (kbd_repeat_key) {
+    int w = kbd_repeat_key / 64, bit = kbd_repeat_key % 64;
+    if (!(st.keys[w] & (1ull << bit))) {
+      kbd_repeat_key = 0;
+    } else if (now >= kbd_repeat_at) {
+      nx_kbd_emit(kbd_repeat_key, st.modifiers);
+      kbd_repeat_at = now + NX_KBD_REPEAT_RATE_US;
+    }
+  }
+
+  memcpy(kbd_prev, st.keys, sizeof(kbd_prev));
 }
 
 /* -------------------------------------------------------------- threads -- */

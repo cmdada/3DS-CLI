@@ -531,12 +531,5 @@ jobs:
             | GameCube | `gamecube/3ds-cli.dol` | anywhere Swiss can reach |
             | PS3 | `ps3/3ds-cli.pkg` | install it from the XMB |
 
-            The PS3 is the exception to step 2: it has no removable card, so
-            its `Image` goes to `/dev_hdd0/3ds-cli/` on the internal drive,
-            which is easiest to fill over FTP. It also needs a display that can
-            do 720p, the only mode the terminal is laid out for. There is a
-            `ps3/3ds-cli.self` in the zip too, for loaders that want one
-            instead of the `.pkg`.
-
             That's it. The other zips below are for the Open Shop Channel and
             the Homebrew App Store to install from, not for copying by hand.

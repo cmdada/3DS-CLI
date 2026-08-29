@@ -185,6 +185,10 @@ void plat_poll_input(plat_input_t *out) {
   out->ptr_y = (int16_t)t.py;
 }
 
+/* No USB host on this console - the panel keyboard is the only one there
+   is. See plat_poll_keyboard in source/core/plat.h. */
+void plat_poll_keyboard(void) {}
+
 /* --------------------------------------------------------------- threads -- */
 
 static Thread      emu_thread;

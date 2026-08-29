@@ -52,6 +52,11 @@ typedef struct {
   bool audio, camera, mic;
   bool swkbd;        /* a system keyboard applet for the line-compose pane */
   bool speedup;      /* a clock/cache boost was available and taken        */
+  /* A real keyboard is plugged into the console's USB port. Unlike every
+     other flag here this one changes while the app runs, because the user can
+     pull the cable - see plat_poll_keyboard. False forever on a console with
+     no USB host at all. */
+  bool keyboard;
 } plat_caps_t;
 
 const plat_caps_t *plat_caps(void);
@@ -181,6 +186,25 @@ typedef struct {
 void plat_poll_input(plat_input_t *out);
 
 /* ------------------------------------------------------------------
+ * Real keyboard
+ *
+ * A console with a USB host port can have an actual keyboard on it, which is
+ * a far better terminal than any grid of keys on a panel. The backend
+ * translates its console's own events - HID usage ids on most of them - into
+ * the bytes a terminal expects and pushes them into the same ring the panel
+ * keyboard feeds, so core neither knows nor cares which one typed.
+ *
+ * source/platform/hid_ascii.h does the translation for the backends whose
+ * console hands over raw usage ids rather than characters.
+ * ------------------------------------------------------------------ */
+
+/* Drains whatever the keyboard produced since the last call, pushing it into
+   the ring, and updates caps.keyboard for the settings page. A no-op where
+   the console has no USB host. Must be called from the same thread as
+   plat_poll_input. */
+void plat_poll_keyboard(void);
+
+/* ------------------------------------------------------------------
  * Threads
  *
  * Exactly one thread is ever created (the emulator's), so there is no handle
@@ -240,8 +264,8 @@ void plat_mutex_unlock(plat_mutex_t *m);
 #if PLAT_BIG_ENDIAN
 /* Byte by byte through volatile pointers. The obvious lowering - PowerPC's
    lwbrx/stwbrx - is what the volatile is there to prevent: those instructions
-   raise an alignment exception on an unaligned address, and Cemu does not
-   appear to implement them at all, taking the host down instead. */
+   raise an alignment exception on an unaligned address, and are not reliably
+   implemented on every Wii U host besides. */
 static inline uint16_t g_ld16(const void *p) {
   const volatile uint8_t *b = (const volatile uint8_t *)p;
   return (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));

@@ -13,7 +13,7 @@ ifeq ($(OGC_CONSOLE),wii)
 include $(DEVKITPPC)/wii_rules
 BUILD		:=	build-wii
 MACHDEP_EXTRA	:=
-LIBS		:=	-lz -lfat -lwiiuse -lbte -logc -lm
+LIBS		:=	-lz -lfat -lwiikeyboard -lwiiuse -lbte -logc -lm
 else
 include $(DEVKITPPC)/gamecube_rules
 BUILD		:=	build-gamecube

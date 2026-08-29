@@ -24,9 +24,11 @@
 #include <sysutil/sysutil.h>
 #include <rsx/rsx.h>
 #include <io/pad.h>
+#include <io/kb.h>
 #include <net/net.h>
 
 #include "plat.h"
+#include "hid_ascii.h"
 
 /* Primary PPU thread priority and stack. The emulator thread is created in
    the same priority band - see plat_thread_start. */
@@ -197,6 +199,10 @@ bool plat_init(void) {
      plat_sample_axes, so a failure here is what makes caps.sensors false. */
   caps.sensors = ioPadSetSensorMode(0, 1) == 0;
 
+  /* Brings the keyboard library up; whether anything is actually plugged in
+     is asked every frame in plat_poll_keyboard, because it can change. */
+  ioKbInit(MAX_KB_PORT_NUM);
+
   sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, ps3_sysutil_cb, NULL);
 
   /* Unlike every other console here the storage is not removable, so there is
@@ -218,6 +224,7 @@ bool plat_init(void) {
 }
 
 void plat_exit(void) {
+  ioKbEnd();
   ioPadEnd();
   if (context) {
     gcmSetWaitFlip(context);
@@ -320,6 +327,68 @@ void plat_poll_input(plat_input_t *out) {
   out->pan_x = (sx >  PS3_STICK_DEADZONE) ?  1 : (sx < -PS3_STICK_DEADZONE) ? -1 : 0;
   /* The stick reads larger downwards; the viewport pans the other way. */
   out->pan_y = (sy >  PS3_STICK_DEADZONE) ?  1 : (sy < -PS3_STICK_DEADZONE) ? -1 : 0;
+}
+
+/* ------------------------------------------------------------- keyboard -- */
+
+/* lv2 will do the layout translation itself, in whatever mapping the user set
+   in the XMB, which is better than anything this could infer from a usage id.
+   So the port is asked for ASCII and hid_ascii.h is only consulted for the
+   keys that have no character - arrows, function keys - which come back with
+   KB_RAWDAT set and the raw usage in the low byte. */
+static bool kb_configured;
+
+static void ps3_kb_configure(void) {
+  ioKbSetCodeType(0, KB_CODETYPE_ASCII);
+  /* Character mode rather than packet mode: lv2 does the key repeat and hands
+     over typed characters, so there is no edge detection to do here. */
+  ioKbSetReadMode(0, KB_RMODE_INPUTCHAR);
+  kb_configured = true;
+}
+
+void plat_poll_keyboard(void) {
+  KbInfo info;
+  if (ioKbGetInfo(&info) != 0 || info.connected == 0) {
+    /* Unplugged. Forget the configuration too: the next keyboard to arrive is
+       a fresh port that has never been told what code type we want. */
+    caps.keyboard = false;
+    kb_configured = false;
+    return;
+  }
+  caps.keyboard = true;
+  if (!kb_configured) ps3_kb_configure();
+
+  KbData d;
+  if (ioKbRead(0, &d) != 0 || d.nb_keycode <= 0) return;
+
+  bool ctrl  = d.mkey._KbMkeyU._KbMkeyS.l_ctrl  || d.mkey._KbMkeyU._KbMkeyS.r_ctrl;
+  bool shift = d.mkey._KbMkeyU._KbMkeyS.l_shift || d.mkey._KbMkeyU._KbMkeyS.r_shift;
+
+  for (int i = 0; i < d.nb_keycode; i++) {
+    uint16_t k = d.keycode[i];
+    if (k == 0) continue;
+
+    if (k & KB_RAWDAT) {
+      char buf[8];
+      const char *s = hid_term_bytes((uint8_t)(k & 0xFF), shift, ctrl, false, buf);
+      if (s) rx_push_str(s);
+      continue;
+    }
+
+    char c = (char)(k & 0xFF);
+    if (!c) continue;
+    /* Ctrl is not folded in for us even in ASCII mode, and a terminal without
+       ctrl-c is not much of a terminal. */
+    if (ctrl) {
+      if (c >= 'a' && c <= 'z')      c = (char)(c - 'a' + 1);
+      else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 1);
+      else if (c == ' ')             c = 0;
+      else if (c == '[')             c = 0x1b;
+      else if (c == '\\')            c = 0x1c;
+      else if (c == ']')             c = 0x1d;
+    }
+    rx_push(c);
+  }
 }
 
 /* -------------------------------------------------------------- threads -- */

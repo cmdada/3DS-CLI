@@ -17,11 +17,13 @@
 #include <coreinit/time.h>
 #include <coreinit/mutex.h>
 #include <nn/ac.h>
+#include <nsyskbd/nsyskbd.h>
 #include <vpad/input.h>
 #include <whb/proc.h>
 #include <whb/sdcard.h>
 
 #include "plat.h"
+#include "hid_ascii.h"
 
 _Static_assert(sizeof(OSMutex) <= PLAT_MUTEX_SIZE, "PLAT_MUTEX_SIZE too small for OSMutex");
 
@@ -189,6 +191,11 @@ void plat_present(unsigned mask) {
 
 /* ----------------------------------------------------------------- life -- */
 
+/* Defined with the rest of the keyboard, below; KBDSetup wants them here. */
+static void cafe_kbd_attach(KBDAttachEvent *e);
+static void cafe_kbd_detach(KBDAttachEvent *e);
+static void cafe_kbd_key(KBDKeyEvent *e);
+
 bool plat_init(void) {
   WHBProcInit();
   /* Nothing else mounts it: WHBProcInit brings up the process, not the
@@ -216,6 +223,9 @@ bool plat_init(void) {
   }
 
   VPADInit();
+  /* A USB keyboard in either of the console's ports. The attach callback is
+     what sets caps.keyboard, so nothing is assumed about one being there. */
+  KBDSetup(cafe_kbd_attach, cafe_kbd_detach, cafe_kbd_key);
 
   caps.emu_thread = true;
   caps.pointer    = true;
@@ -231,6 +241,7 @@ bool plat_init(void) {
 }
 
 void plat_exit(void) {
+  KBDTeardown();
   if (caps.net) ACFinalize();
   OSScreenShutdown();
   WHBUnmountSdCard();
@@ -317,6 +328,64 @@ void plat_poll_input(plat_input_t *out) {
   out->ptr_x = (int16_t)px;
   out->ptr_y = (int16_t)py;
   was_down = on_panel;
+}
+
+/* ------------------------------------------------------------- keyboard -- */
+
+/* nsyskbd is the only keyboard interface here that pushes rather than polls,
+   and its callbacks run on the driver's own thread. So they translate into a
+   byte ring and plat_poll_keyboard drains it, which keeps every rx_push on
+   the thread core expects.
+ *
+ * Single producer, single consumer, and a full ring drops rather than blocks:
+ * losing a keystroke is better than stalling the input driver. */
+#define CAFE_KBD_RING 64
+static volatile char     kbd_ring[CAFE_KBD_RING];
+static volatile uint32_t kbd_head, kbd_tail;
+static volatile bool     kbd_ctrl, kbd_shift;
+
+static void cafe_kbd_put(const char *s) {
+  for (; *s; s++) {
+    uint32_t next = (kbd_head + 1) % CAFE_KBD_RING;
+    if (next == kbd_tail) return;
+    kbd_ring[kbd_head] = *s;
+    kbd_head = next;
+  }
+}
+
+static void cafe_kbd_attach(KBDAttachEvent *e) { (void)e; caps.keyboard = true; }
+static void cafe_kbd_detach(KBDAttachEvent *e) { (void)e; caps.keyboard = false; }
+
+static void cafe_kbd_key(KBDKeyEvent *e) {
+  uint8_t usage = e->hidCode;
+
+  /* The modifiers arrive as ordinary key events, and nothing else reports
+     their state, so they are tracked here. */
+  if (usage == 0xE0 || usage == 0xE4) { kbd_ctrl  = e->isPressedDown; return; }
+  if (usage == 0xE1 || usage == 0xE5) { kbd_shift = e->isPressedDown; return; }
+  if (!e->isPressedDown) return;
+
+  char buf[8];
+  uint16_t ch = e->asUTF16Character;
+  /* The driver has already applied the user's own layout, so its character is
+     better than anything the usage id could be turned into - but only for
+     printable ones. Enter, tab and backspace come back as control codes that
+     disagree with what the other backends send, so those go through the
+     shared table instead and stay consistent. */
+  if (!kbd_ctrl && ch >= 0x20 && ch < 0x7f) {
+    buf[0] = (char)ch; buf[1] = 0;
+    cafe_kbd_put(buf);
+    return;
+  }
+  const char *out = hid_term_bytes(usage, kbd_shift, kbd_ctrl, false, buf);
+  if (out) cafe_kbd_put(out);
+}
+
+void plat_poll_keyboard(void) {
+  while (kbd_tail != kbd_head) {
+    rx_push(kbd_ring[kbd_tail]);
+    kbd_tail = (kbd_tail + 1) % CAFE_KBD_RING;
+  }
 }
 
 /* -------------------------------------------------------------- threads -- */

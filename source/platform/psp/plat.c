@@ -234,6 +234,10 @@ void plat_poll_input(plat_input_t *out) {
   out->ptr_valid = false;
 }
 
+/* The PSP's USB port is device-only: it can be a drive on a PC, but it
+   cannot host a keyboard. See plat_poll_keyboard in source/core/plat.h. */
+void plat_poll_keyboard(void) {}
+
 /* -------------------------------------------------------------- threads -- */
 
 static SceUID emu_tid = -1;

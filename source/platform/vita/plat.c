@@ -261,6 +261,10 @@ void plat_poll_input(plat_input_t *out) {
   was_down = on_panel;
 }
 
+/* Same as the PSP: the port is device-only, so there is no keyboard to
+   host. See plat_poll_keyboard in source/core/plat.h. */
+void plat_poll_keyboard(void) {}
+
 /* -------------------------------------------------------------- threads -- */
 
 static SceUID emu_tid = -1;

@@ -111,10 +111,11 @@ static FILE *uart_log_file = NULL; // <SD>/3ds-cli-console.log mirror of guest c
    The size it picks is a guess with nothing to do with how an SD card likes to
    be written, and the log below is filled a byte at a time by fputc, so the
    buffer is exactly what decides how many card writes a boot costs. The fstat
-   is worse: on the Wii U it goes through wut's FSA layer, and the first byte
-   of guest console output took Cemu down inside __wut_fsa_fstat - a crash that
-   only appeared once there was an Image to boot, because without one the guest
-   never prints. Handing each stream its buffer up front settles both. */
+   is worse: on the Wii U it goes through wut's FSA layer, where the first byte
+   of guest console output brings the whole app down inside __wut_fsa_fstat - a
+   crash that only shows up once there is an Image to boot, because without one
+   the guest never prints. Handing each stream its buffer up front settles
+   both. */
 #define LOG_BUF_SIZE 4096
 static char uart_log_buf[LOG_BUF_SIZE];
 static char dbg_log_buf[LOG_BUF_SIZE];
@@ -1156,6 +1157,10 @@ int main(int argc, char **argv) {
 
     plat_input_t in;
     plat_poll_input(&in);
+    /* A real keyboard, where one is plugged in, types straight into the
+       guest's ring. Only worth doing here: every other poll in this file is a
+       button-driven prompt with no guest to type at yet. */
+    plat_poll_keyboard();
     uint32_t kDown = in.down;
     if (kDown & PLAT_BTN_QUIT) break;
 

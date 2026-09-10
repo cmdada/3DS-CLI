@@ -129,8 +129,16 @@ bool plat_surface(plat_surf s, plat_fb_t *out) {
 }
 
 void plat_present(unsigned mask) {
-  /* Only the top screen is double-buffered, so the panel needs no flip: it was
-     drawn straight into the framebuffer the LCD is already scanning. */
+  /* The panel is never flipped - it is drawn straight into the framebuffer the
+     LCD is already scanning - but that framebuffer is cached linear heap, and
+     the LCD reads RAM, not the D-cache. Until the lines are written back the
+     screen shows a mix of old and new pixels, worst in whatever was drawn last,
+     and it stays that way until something else happens to flush them. */
+  if (mask & PLAT_SURF_BIT(PLAT_SURF_PANEL)) {
+    u16 w, h;
+    u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    GSPGPU_FlushDataCache(fb, (u32)w * h * 3);
+  }
   if (!(mask & PLAT_SURF_BIT(PLAT_SURF_TERM))) return;
   gfxFlushBuffers();
   gfxSwapBuffers();

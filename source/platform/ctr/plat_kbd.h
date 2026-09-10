@@ -60,12 +60,17 @@ void pkbd_update(const plat_input_t *in) {
 /* Both modes are dirty-tracked and only repaint when something changed: a
    full bottom-screen repaint is not free on an Old 3DS. */
 void pkbd_draw(void) {
-  if (g_kbd_mode != 0) { pane_draw(); return; }
-
-  plat_fb_t fb;
-  if (!plat_surface(PLAT_SURF_PANEL, &fb)) return;
-  CtrOskSurface dst = { fb.base, fb.w, fb.h, fb.x_stride, fb.y_stride, 0 };
-  ctrOskDraw(&g_osk, &dst);
+  if (g_kbd_mode != 0) {
+    if (!pane_dirty) return;
+    pane_draw();
+  } else {
+    if (!g_osk.dirty) return;
+    plat_fb_t fb;
+    if (!plat_surface(PLAT_SURF_PANEL, &fb)) return;
+    CtrOskSurface dst = { fb.base, fb.w, fb.h, fb.x_stride, fb.y_stride, 0 };
+    ctrOskDraw(&g_osk, &dst);
+  }
+  plat_present(PLAT_SURF_BIT(PLAT_SURF_PANEL));
 }
 
 #endif /* PLAT_KBD_H */

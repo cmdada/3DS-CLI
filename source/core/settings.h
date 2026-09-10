@@ -408,6 +408,8 @@ static void settings_draw(void) {
     ui_button(p, cx + 20, cy + ch - 30, 100, 22, "A  reset", UI_BTN_DANGER);
     ui_button(p, cx + cw - 120, cy + ch - 30, 100, 22, "B  cancel", UI_BTN_NORMAL);
   }
+
+  plat_present(PLAT_SURF_BIT(PLAT_SURF_PANEL));
 }
 
 /* ------------------------------------------------- apply, actions, info --- */

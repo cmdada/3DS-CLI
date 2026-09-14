@@ -499,6 +499,10 @@ static int32_t HandleOtherCSRRead(uint8_t *image, uint16_t csrno);
 #include "virtio_blk.h"
 #include "virtio_rng.h"
 #include "virtio_net.h"
+/* Below virtio_net.h, not up with config.h: on libogc plat_sock.h renames
+   send/recv/select/connect with macros, and those must not be in scope over
+   the emulator and device headers above. I spent wayyyy too much team realizing */
+#include "analytics.h"
 #include "virtio_9p.h"
 #include "virtio_input.h"
 #include "rtc_goldfish.h"
@@ -966,6 +970,17 @@ int main(int argc, char **argv) {
   if (g_dev_net) {
     vnet_init();
     term_printf("Network: %s\n", vnet.soc_ready ? "ok (NAT via 3DS WiFi)" : "unavailable");
+    /* The launch ping, which only exists where the socket stack came up. */
+    if (vnet.soc_ready) {
+      bool minted = false;
+      an_start(&g_cfg, &minted);
+      if (minted && !cfg_save(&g_cfg) && dbg_log_file) {
+        /* Worth a line: a card that cannot be written mints a new id every
+           launch, and one console then counts as many. */
+        fprintf(dbg_log_file, "[host] usage ping: install id not saved\n");
+        fflush(dbg_log_file);
+      }
+    }
   } else {
     term_printf("Network: disabled\n");
   }
@@ -1161,6 +1176,18 @@ int main(int argc, char **argv) {
        guest's ring. Only worth doing here: every other poll in this file is a
        button-driven prompt with no guest to type at yet. */
     plat_poll_keyboard();
+ 
+    an_poll();
+    if (dbg_log_file) {
+      static an_result_t an_logged = AN_R_PENDING;
+      an_result_t r = an_result();
+      if (r != an_logged) {
+        static const char *const names[] = { "pending", "off", "sent", "failed" };
+        fprintf(dbg_log_file, "[host] usage ping %s\n", names[r]);
+        fflush(dbg_log_file);
+        an_logged = r;
+      }
+    }
     uint32_t kDown = in.down;
     if (kDown & PLAT_BTN_QUIT) break;
 

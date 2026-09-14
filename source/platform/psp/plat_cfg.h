@@ -4,6 +4,7 @@
 /* Sony PlayStation Portable (pspdev + pspsdk). See source/core/plat.h. */
 
 #define PLAT_NAME        "PSP"
+#define PLAT_SLUG        "psp"
 
 /* The Memory Stick */
 #define PLAT_SD          "ms0:/"

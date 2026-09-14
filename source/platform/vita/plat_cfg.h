@@ -4,6 +4,7 @@
 /* Sony PlayStation Vita (VitaSDK). See source/core/plat.h. */
 
 #define PLAT_NAME        "Vita"
+#define PLAT_SLUG        "vita"
 
 /* ux0: is the memory card on the models that take one and internal storage on
    a 1000 or a PSTV, so it's the writable volume either way */

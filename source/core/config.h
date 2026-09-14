@@ -39,13 +39,17 @@ typedef struct {
      under a driver that has bound to it is a guest hang. */
   bool dev_net, dev_sd, dev_nand, dev_twl, dev_sensors, dev_rng, dev_swap;
   int  ram_cap_mb;     /* 0 = auto (walk malloc down from PLAT_RAM_MAX_MB)  */
+  bool analytics;
+  /* 32 hex digits, minted on the first launch that pings and never again.
+     Empty until then. Deleting the line makes this console a new install. */
+  char install_id[33];
 
   /* Set by the settings page, consumed and cleared by the next boot: the page
      cannot unlink rootfs.ext2 while the emulator thread has it open. */
   bool reset_rootfs;
 } Cfg;
 
-typedef enum { CFG_BOOL, CFG_INT } CfgType;
+typedef enum { CFG_BOOL, CFG_INT, CFG_HEX32 } CfgType;
 
 typedef struct {
   const char *key;
@@ -79,6 +83,9 @@ static const CfgField cfg_fields[] = {
   CFG_F(dev_swap,      CFG_BOOL, 0, 1),
   CFG_F(ram_cap_mb,    CFG_INT,  0, PLAT_RAM_MAX_MB),
 
+  CFG_F(analytics,     CFG_BOOL, 0, 1),
+  CFG_F(install_id,    CFG_HEX32, 0, 0),
+
   CFG_F(reset_rootfs,  CFG_BOOL, 0, 1),
 };
 
@@ -89,6 +96,9 @@ static inline bool *cfg_boolp(Cfg *c, const CfgField *f) {
 }
 static inline int *cfg_intp(Cfg *c, const CfgField *f) {
   return (int *)((char *)c + f->off);
+}
+static inline char *cfg_strp(Cfg *c, const CfgField *f) {
+  return (char *)c + f->off;
 }
 
 /* Defaults reproduce the app's pre-settings behaviour, except that `theme`
@@ -113,6 +123,9 @@ static inline void cfg_defaults(Cfg *c) {
   /* Consoles with room for a real guest RAM allocation have no use for swap. */
   c->dev_swap    = PLAT_WANT_SWAP;
   c->ram_cap_mb    = 0;       /* auto                                       */
+
+  c->analytics     = true;
+  c->install_id[0] = '\0';    /* minted on the first launch that pings      */
 
   c->reset_rootfs  = false;
 }
@@ -149,6 +162,16 @@ static inline void cfg_load(Cfg *c) {
       const CfgField *fd = &cfg_fields[i];
       if (strcmp(key, fd->key) != 0) continue;
 
+      if (fd->type == CFG_HEX32) {
+        /* Anything but exactly 32 hex digits is treated as absent, so a
+           truncated write or a hand-edit mints a fresh id rather than
+           filing this console's launches under a malformed one. */
+        int n = 0;
+        while (n < 33 && val[n] && strchr("0123456789abcdefABCDEF", val[n])) n++;
+        if (n == 32) { memcpy(cfg_strp(c, fd), val, 32); cfg_strp(c, fd)[32] = '\0'; }
+        break;
+      }
+
       char *end = NULL;
       long v = strtol(val, &end, 10);
       if (end == val || *end != '\0') break;      /* not a number: keep default */
@@ -174,6 +197,10 @@ static inline bool cfg_save(const Cfg *c) {
   for (int i = 0; i < CFG_NFIELDS; i++) {
     const CfgField *fd = &cfg_fields[i];
     Cfg *m = (Cfg *)c;  /* the accessors are shared with the mutable path */
+    if (fd->type == CFG_HEX32) {
+      fprintf(f, "%s=%s\n", fd->key, cfg_strp(m, fd));
+      continue;
+    }
     int v = (fd->type == CFG_BOOL) ? (*cfg_boolp(m, fd) ? 1 : 0) : *cfg_intp(m, fd);
     fprintf(f, "%s=%d\n", fd->key, v);
   }

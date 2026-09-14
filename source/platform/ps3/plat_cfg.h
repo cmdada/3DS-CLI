@@ -4,6 +4,7 @@
 /* Sony PlayStation 3 (PSL1GHT). See source/core/plat.h. */
 
 #define PLAT_NAME        "PS3"
+#define PLAT_SLUG        "ps3"
 
 /* The internal drive. Unlike every other console here this is not a card the
    user can pull, so there is no "copy it on a PC" story - the files arrive

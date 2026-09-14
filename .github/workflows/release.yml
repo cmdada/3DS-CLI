@@ -509,7 +509,6 @@ jobs:
           files: |
             3ds_cli.zip
             release/Image
-            dist/packages/oscwii-3ds-cli.zip
             dist/packages/hbas-wiiu-3ds-cli.zip
             dist/packages/hbas-switch-3ds-cli.zip
           make_latest: true
@@ -531,5 +530,5 @@ jobs:
             | GameCube | `gamecube/3ds-cli.dol` | anywhere Swiss can reach |
             | PS3 | `ps3/3ds-cli.pkg` | install it from the XMB |
 
-            That's it. The other zips below are for the Open Shop Channel and
-            the Homebrew App Store to install from, not for copying by hand.
+            That's it. The other zips below are for the Homebrew App Store
+            to install from, not for copying by hand.

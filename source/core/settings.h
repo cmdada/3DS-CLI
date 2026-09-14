@@ -133,6 +133,7 @@ static const Row rows_hw[] = {
   R_TOGGLE("Hardware RNG",      dev_rng,      true),
   R_TOGGLE("Swap file",         dev_swap,     true),
   R_CHOICE("Guest RAM cap",     ram_cap_mb,   lbl_ram,   val_ram,   true),
+  R_TOGGLE("Usage ping",        analytics,    true),
 };
 
 /* Exactly SET_ROWS_VIS rows, deliberately: the three info rows are not

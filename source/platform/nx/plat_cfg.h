@@ -4,6 +4,7 @@
 /* Nintendo Switch (devkitA64 + libnx). See source/core/plat.h. */
 
 #define PLAT_NAME        "Switch"
+#define PLAT_SLUG        "switch"
 
 /* libnx mounts the SD card as the default device, so an unqualified path
    already lands there; the prefix is spelled out to match every other

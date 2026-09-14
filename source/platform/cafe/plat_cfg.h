@@ -4,6 +4,7 @@
 /* Nintendo Wii U (devkitPPC + wut). See source/core/plat.h. */
 
 #define PLAT_NAME        "Wii U"
+#define PLAT_SLUG        "wiiu"
 
 /* Aroma and the Homebrew Launcher both mount the SD card here. Unlike
    Horizon's drive prefix this is a real path, so the directory exists. */

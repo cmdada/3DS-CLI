@@ -4,6 +4,7 @@
 /* Nintendo 3DS (devkitARM + libctru). See source/core/plat.h. */
 
 #define PLAT_NAME        "3DS"
+#define PLAT_SLUG        "3ds"
 
 /* Every path the app writes: config, the three logs, the rootfs and the swap
    file. Horizon's SD mount is a drive prefix, not a directory, so this is not

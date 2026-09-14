@@ -9,12 +9,14 @@
 
 #ifdef HW_RVL
 #define PLAT_NAME        "Wii"
+#define PLAT_SLUG        "wii"
 /* The front SD slot, mounted by libfat. */
 #define PLAT_SD          "sd:/"
 /* MEM2 is 64MB and the app has most of it. */
 #define PLAT_RAM_MAX_MB  48
 #else
 #define PLAT_NAME        "GameCube"
+#define PLAT_SLUG        "gamecube"
 /* An SD Gecko in memory card slot A. A memory card cannot hold a ~200MB
    rootfs, so there is no other option on this console. */
 #define PLAT_SD          "carda:/"

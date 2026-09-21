@@ -6,7 +6,9 @@ BasicInfo:
   Logo                    : Nintendo
 
 TitleInfo:
-  UniqueId                : 0x01111
+  # (issue #10).
+  # Title ID: 000400000F911100.
+  UniqueId                : 0xF9111
   Category                : Application
 
 Option:

@@ -43,6 +43,7 @@ uint32_t ram_amt = PLAT_RAM_MAX_MB * 1024u * 1024u;
 // Smallest amount of RAM left over after the kernel image that's worth
 // trying to boot on - see the size check in main().
 #define MIN_GUEST_FREE_RAM (PLAT_RAM_MIN_MB * 1024u * 1024u)
+#define NET_HEAP_RESERVE   (2u * 1024u * 1024u)
 uint8_t *ram_image = 0;
 struct MiniRV32IMAState *core;
 
@@ -866,11 +867,15 @@ int main(int argc, char **argv) {
     if (cap < ram_amt) ram_amt = cap;
   }
 
+  void *net_reserve = g_dev_net ? malloc(NET_HEAP_RESERVE) : NULL;
+
   while (ram_amt >= PLAT_RAM_MIN_MB * 1024u * 1024u) {
     ram_image = malloc(ram_amt);
     if (ram_image) break;
     ram_amt -= 1024 * 1024;
   }
+
+  free(net_reserve);
 
   if (!ram_image) {
     term_printf("Failed to allocate at least %dMB for RAM.\n", PLAT_RAM_MIN_MB);

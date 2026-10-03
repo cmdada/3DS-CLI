@@ -131,10 +131,16 @@ bool plat_init(void) {
   memset(psp_vram, 0, PSP_FB_BYTES);
   sceKernelDcacheWritebackAll();
 
+  /* NEXTFRAME, not IMMEDIATE: an immediate set is refused (0x80000107) when
+     the format or stride differs from the latched one, which is whatever the
+     PSP left behind at launch.
+     */
   sceDisplaySetMode(0, PSP_SCREEN_W, PSP_SCREEN_H);
-  sceDisplaySetFrameBuf(psp_vram, PSP_FB_STRIDE_PX,
-                        PSP_DISPLAY_PIXEL_FORMAT_8888,
-                        PSP_DISPLAY_SETBUF_IMMEDIATE);
+  if (sceDisplaySetFrameBuf(psp_vram, PSP_FB_STRIDE_PX,
+                            PSP_DISPLAY_PIXEL_FORMAT_8888,
+                            PSP_DISPLAY_SETBUF_NEXTFRAME) < 0)
+    return false;
+  sceDisplayWaitVblankStart();
 
   sceCtrlSetSamplingCycle(0);            /* sample on the display's vblank */
   sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
@@ -189,9 +195,9 @@ void plat_sleep_us(uint64_t us) {
 /* ---------------------------------------------------------------- input -- */
 
 /* The nub reads 0..255 with its centre near 128 and a good deal of slop
-   around it; this is the hardware's, not a UI preference. 
-   
-   also lowkey this is the first time I've typed slop in a while in a 
+   around it; this is the hardware's, not a UI preference.
+
+   also lowkey this is the first time I've typed slop in a while in a
    non-ai matter, yay! the world is doomed */
 #define PSP_NUB_DEADZONE 32
 

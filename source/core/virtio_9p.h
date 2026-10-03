@@ -176,6 +176,18 @@ static const char       *v9p_tree_root[V9P_TREE_TOTAL];
 static bool              v9p_tree_ro[V9P_TREE_TOTAL];
 static bool              v9p_tree_ok[V9P_TREE_TOTAL];
 
+/* Every tree a mount can reach by name: the real ones, then hw. hw sits at
+   its fixed index above the real trees, so a 0..V9P_TREE_COUNT loop alone
+   never sees it. */
+#define V9P_TREE_NAMED  (V9P_TREE_COUNT + 1)
+static int v9p_tree_nth(int n) { return n < V9P_TREE_COUNT ? n : V9P_TREE_HW; }
+
+static int v9p_tree_find(const char *aname) {
+    for (int n = 0; n < V9P_TREE_NAMED; n++)
+        if (!strcmp(aname, v9p_tree_aname[v9p_tree_nth(n)])) return v9p_tree_nth(n);
+    return -1;
+}
+
 /* ------------------------------------------------------------------
  * Synthetic `hw` tree
  * ------------------------------------------------------------------ */
@@ -489,8 +501,7 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
            available tree; naming one mounts just that subtree. */
         int tree = -1;
         if (!aname[0] || !strcmp(aname, "/")) tree = V9P_TREE_ROOT;
-        else for (int i = 0; i < V9P_TREE_COUNT; i++)
-            if (!strcmp(aname, v9p_tree_aname[i])) { tree = i; break; }
+        else tree = v9p_tree_find(aname);
         if (tree < 0) return v9p_error(&w, tag, L_ENOENT);
         if (!v9p_tree_ok[tree]) return v9p_error(&w, tag, L_ENODATA);
 
@@ -551,10 +562,8 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
             } else if (!v9p_name_ok(name)) {
                 err = L_ENOENT; break;
             } else if (wtree == V9P_TREE_ROOT) {
-                int idx = -1;
-                for (int t = 0; t < V9P_TREE_COUNT; t++)
-                    if (v9p_tree_ok[t] && !strcmp(name, v9p_tree_aname[t])) { idx = t; break; }
-                if (idx < 0) { err = L_ENOENT; break; }
+                int idx = v9p_tree_find(name);
+                if (idx < 0 || !v9p_tree_ok[idx]) { err = L_ENOENT; break; }
                 wtree = idx;
                 whw = -1;
                 snprintf(wpath, sizeof(wpath), "%s", v9p_tree_root[idx]);
@@ -824,7 +833,8 @@ static uint32_t v9p_handle(const uint8_t *req, uint32_t reqlen,
             /* ".", "..", then one directory per tree that actually came up.
                Absent trees are omitted rather than shown as broken entries,
                so `ls /mnt/3ds` is an accurate list of what's reachable. */
-            for (int i = -2; i < V9P_TREE_COUNT; i++) {
+            for (int n = -2; n < V9P_TREE_NAMED; n++) {
+                int i = (n < 0) ? n : v9p_tree_nth(n);
                 if (i >= 0 && !v9p_tree_ok[i]) continue;
                 if (idx < off) { idx++; continue; }
                 const char *nm = (i == -2) ? "." : (i == -1) ? ".." : v9p_tree_aname[i];

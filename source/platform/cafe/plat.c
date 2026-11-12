@@ -396,7 +396,7 @@ static OSThread  emu_thread;
 static uint8_t  *emu_stack;
 static bool      emu_started;
 
-static int emu_trampoline(int argc, const char **argv) {
+static int emu_trampoline(int argc, void *argv) {
   void (*entry)(void *) = (void (*)(void *))argv;
   (void)argc;
   entry(NULL);
@@ -407,7 +407,7 @@ bool plat_thread_start(void (*entry)(void *), void *arg) {
   (void)arg;
   emu_stack = (uint8_t *)MEMAllocFromDefaultHeapEx(EMU_STACK_SIZE, 16);
   if (!emu_stack) return false;
-  if (!OSCreateThread(&emu_thread, emu_trampoline, 0, (char *)entry,
+  if (!OSCreateThread(&emu_thread, emu_trampoline, 0, (void *)entry,
                       emu_stack + EMU_STACK_SIZE, EMU_STACK_SIZE, 16,
                       OS_THREAD_ATTRIB_AFFINITY_CPU2)) {
     return false;
@@ -451,9 +451,9 @@ bool plat_random(void *buf, size_t len) { (void)buf; (void)len; return false; }
    a 3DS. The last two axes are sliders the GamePad does not have. */
 void plat_sample_axes(int32_t *out) {
   if (!vpad_ok) { memset(out, 0, sizeof(int32_t) * VI_NAXES); return; }
-  out[0] = (int32_t)(vpad.accelorometer.acc.x * 512.0f);
-  out[1] = (int32_t)(vpad.accelorometer.acc.y * 512.0f);
-  out[2] = (int32_t)(vpad.accelorometer.acc.z * 512.0f);
+  out[0] = (int32_t)(vpad.accelerometer.acc.x * 512.0f);
+  out[1] = (int32_t)(vpad.accelerometer.acc.y * 512.0f);
+  out[2] = (int32_t)(vpad.accelerometer.acc.z * 512.0f);
   out[3] = (int32_t)(vpad.gyro.x * 100.0f);
   out[4] = (int32_t)(vpad.gyro.y * 100.0f);
   out[5] = (int32_t)(vpad.gyro.z * 100.0f);
@@ -494,9 +494,9 @@ static int hw_rd_model(char *b, int n) { return snprintf(b, n, "Wii U\n"); }
 static int hw_rd_accel(char *b, int n) {
   if (!vpad_ok) return snprintf(b, n, "unknown\n");
   return snprintf(b, n, "%d %d %d\n",
-                  (int)(vpad.accelorometer.acc.x * 512.0f),
-                  (int)(vpad.accelorometer.acc.y * 512.0f),
-                  (int)(vpad.accelorometer.acc.z * 512.0f));
+                  (int)(vpad.accelerometer.acc.x * 512.0f),
+                  (int)(vpad.accelerometer.acc.y * 512.0f),
+                  (int)(vpad.accelerometer.acc.z * 512.0f));
 }
 static int hw_rd_gyro(char *b, int n) {
   if (!vpad_ok) return snprintf(b, n, "unknown\n");

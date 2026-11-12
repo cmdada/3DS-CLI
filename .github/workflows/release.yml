@@ -23,7 +23,7 @@ jobs:
   # ── Buildroot: kernel Image + rootfs.ext2 ─────────────────────────────────
   buildroot:
     name: Build Linux (Buildroot RV32 Sv32 MMU)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
       # Also part of the images cache key below, so bumping this rebuilds

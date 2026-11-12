@@ -56,6 +56,9 @@ endif
 CFLAGS		=	-g -Wall -O3 -mcpu=cell $(MACHDEP) \
 			-fno-gcse -fno-crossjumping \
 			$(INCLUDE)
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 CXXFLAGS	=	$(CFLAGS) -fno-rtti -fno-exceptions
 LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map
 

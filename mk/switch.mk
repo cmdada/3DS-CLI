@@ -34,6 +34,9 @@ CFLAGS	:=	-g -Wall -O3 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)

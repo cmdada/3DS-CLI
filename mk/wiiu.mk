@@ -34,6 +34,9 @@ CFLAGS	:=	-g -Wall -O3 -ffunction-sections \
 			$(MACHDEP)
 
 CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(MACHDEP)

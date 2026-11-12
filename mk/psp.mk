@@ -32,6 +32,9 @@ $(shell mkdir -p $(BUILD) $(DISTDIR))
 CFLAGS		:=	-g -Wall -O3 -G0 -ffunction-sections \
 			-fno-gcse -fno-crossjumping \
 			-MMD -MP
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS		:=	$(CFLAGS)
 

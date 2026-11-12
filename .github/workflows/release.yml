@@ -12,6 +12,9 @@ on:
         required: false
         type: string
 
+env:
+  RELEASE_VERSION: ${{ inputs.tag }}
+
 permissions:
   contents: write
 

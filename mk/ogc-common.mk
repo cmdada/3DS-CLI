@@ -36,6 +36,9 @@ CFLAGS	:=	-g -Wall -O3 -ffunction-sections \
 			-fno-gcse -fno-crossjumping \
 			$(MACHDEP)
 CFLAGS	+=	$(INCLUDE)
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(MACHDEP)
 LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $*.map)

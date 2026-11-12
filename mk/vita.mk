@@ -45,6 +45,9 @@ CFLAGS		:=	-g -Wall -O3 -ffunction-sections \
 			-fno-gcse -fno-crossjumping \
 			-MMD -MP $(ARCH) \
 			$(foreach dir,$(INCDIR),-I$(dir))
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 
 LDFLAGS		:=	-Wl,-q $(ARCH)
 

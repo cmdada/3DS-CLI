@@ -18,8 +18,8 @@
 #include "config.h"
 
 #ifndef APP_VERSION
-/* Overridable from the build (-DAPP_VERSION='"v1.2"'); the release job does
-   not stamp it yet I should probably get on that */
+/* Overridable from the build (-DAPP_VERSION='"v1.2"'); the release job sets
+   it from the tag */
 #define APP_VERSION "dev"
 #endif
 
@@ -53,6 +53,7 @@ typedef enum {
   AN_DNS,
   AN_CONNECT,
   AN_SEND,
+  AN_RECV,
 } an_state_t;
 
 typedef enum { AN_R_PENDING = 0, AN_R_OFF, AN_R_SENT, AN_R_FAILED } an_result_t;
@@ -67,6 +68,8 @@ static struct {
   char       req[320];
   int        req_len;
   int        req_sent;
+  char       resp[16];
+  int        resp_len;
   an_result_t result;
 } an;
 
@@ -347,8 +350,23 @@ static void an_poll(void) {
       int n = send(an.fd, an.req + an.req_sent, (size_t)(an.req_len - an.req_sent), 0);
       if (n <= 0) { an_stop(AN_R_FAILED); return; }
       an.req_sent += n;
-      // The reply is never read. Nothing here acts on it
-      if (an.req_sent >= an.req_len) an_stop(AN_R_SENT);
+      if (an.req_sent >= an.req_len) an.state = AN_RECV;
+      return;
+    }
+
+    case AN_RECV: {
+      fd_set rfds; FD_ZERO(&rfds); FD_SET(an.fd, &rfds);
+      struct timeval tv = {0, 0};
+      if (select(an.fd + 1, &rfds, NULL, NULL, &tv) <= 0 || !FD_ISSET(an.fd, &rfds)) return;
+
+      int room = (int)sizeof(an.resp) - an.resp_len;
+      int n = recv(an.fd, an.resp + an.resp_len, (size_t)room, 0);
+      if (n <= 0) { an_stop(AN_R_FAILED); return; }
+      an.resp_len += n;
+      if (an.resp_len < 12) return;
+
+      an_stop(memcmp(an.resp, "HTTP/1.", 7) == 0 && an.resp[9] == '2'
+                  ? AN_R_SENT : AN_R_FAILED);
       return;
     }
 

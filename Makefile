@@ -74,6 +74,9 @@ CFLAGS	:=	-g -Wall -O3 -fomit-frame-pointer -mword-relocations \
 # produced a larger emulation loop (15008 vs 11796 bytes of ARM).
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__
+ifneq ($(RELEASE_VERSION),)
+CFLAGS	+=	-DAPP_VERSION='"$(RELEASE_VERSION)"'
+endif
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 

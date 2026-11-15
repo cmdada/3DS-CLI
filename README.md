@@ -8,7 +8,7 @@ and GameCube, and Sony's PSP, PS Vita and PS3.
 card, using [mini-rv32ima-mmu](https://github.com/cmdada/mini-rv32ima-mmu), mini-rv32ima with a full Sv32 MMU, S-mode and a built-in SBI,
 running as ordinary homebrew.
 
-![3DS-CLI running on a Nintendo 3DS](assets/example.jpg)
+<img src="assets/example.jpg" alt="3DS-CLI running on a Nintendo 3DS" width="520">
 
 - A terminal (ANSI/xterm, 24-bit colour, zoom, panning) and a touch keyboard,
   on the two screens where the console has two, split top and bottom where it

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <unistd.h>   /* ftruncate, for preallocating the extracted rootfs */
+#include "prealloc.h"
 #include "plat.h"
 #include "terminal.h"
 #include "theme.h"    /* the adabit palette, shared by the terminal and the UI */
@@ -176,16 +176,32 @@ static void PresentTopScreen(uint64_t *last_present_us) {
   *last_present_us = plat_us();
 }
 
+static char g_rootfs_path[sizeof(((Cfg *)0)->rootfs_path) + 16];
+static char g_rootfs_part[sizeof(g_rootfs_path) + 8];
+static bool g_rootfs_custom;
+
+static void ResolveRootfsPath(const Cfg *c) {
+  const char *p = c->rootfs_path;
+  size_t n = strlen(p);
+  g_rootfs_custom = n > 0;
+  if (!n)
+    snprintf(g_rootfs_path, sizeof(g_rootfs_path), PLAT_SD "rootfs.ext2");
+  else if (p[n - 1] == '/' || p[n - 1] == ':')
+    snprintf(g_rootfs_path, sizeof(g_rootfs_path), "%srootfs.ext2", p);
+  else
+    snprintf(g_rootfs_path, sizeof(g_rootfs_path), "%s", p);
+  snprintf(g_rootfs_part, sizeof(g_rootfs_part), "%s.part", g_rootfs_path);
+}
+
 static FILE *OpenDiskFile(const char **opened_path) {
-  static const char *paths[] = { PLAT_SD "rootfs.ext2", "rootfs.ext2" };
-  for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-    FILE *f = fopen(paths[i], "r+b");
-    if (f) {
-      if (opened_path) *opened_path = paths[i];
-      return f;
-    }
+  if (opened_path) *opened_path = g_rootfs_path;
+  FILE *f = fopen(g_rootfs_path, "r+b");
+  if (f) return f;
+  /* default path only */
+  if (!g_rootfs_custom && (f = fopen("rootfs.ext2", "r+b")) != NULL) {
+    if (opened_path) *opened_path = "rootfs.ext2";
+    return f;
   }
-  if (opened_path) *opened_path = paths[0];
   return NULL;
 }
 
@@ -201,10 +217,10 @@ static long ImageKernelLen(FILE *f, long flen, uint32_t *gz_len_out, uint32_t *r
   if (fread(tr, sizeof(tr), 1, f) != 1) { fseek(f, 0, SEEK_SET); return flen; }
   fseek(f, 0, SEEK_SET);
   if (memcmp(tr + 8, IMAGE_TRAILER_MAGIC, 8) != 0) return flen;
-  uint32_t gz_len, raw_len;
-  memcpy(&gz_len, tr + 0, 4);
-  memcpy(&raw_len, tr + 4, 4);
-  if ((long)gz_len + 16 >= flen) return flen; /* implausible: treat as plain */
+  /* little-endian */
+  uint32_t gz_len  = g_ld32(tr + 0);
+  uint32_t raw_len = g_ld32(tr + 4);
+  if ((uint64_t)gz_len + 16 >= (uint64_t)flen) return flen; /* implausible: treat as plain */
   if (gz_len_out) *gz_len_out = gz_len;
   if (raw_len_out) *raw_len_out = raw_len;
   return flen - 16 - (long)gz_len;
@@ -226,10 +242,14 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
      filesystem that made it, with no way for the user to tell what had
      happened. A leftover .part is inert: nothing opens it, and the next
      attempt truncates it. */
-  static const char *kRootfsPath = PLAT_SD "rootfs.ext2";
-  static const char *kRootfsPart = PLAT_SD "rootfs.ext2.part";
+  const char *kRootfsPath = g_rootfs_path;
+  const char *kRootfsPart = g_rootfs_part;
   FILE *out = fopen(kRootfsPart, "wb");
-  if (!out) { inflateEnd(&zs); return false; }
+  if (!out) {
+    term_printf("Cannot create %s\n", kRootfsPart);
+    inflateEnd(&zs);
+    return false;
+  }
 
   /* Set the final length up front rather than growing the file 256KB at a
      time for ~200MB. Extending a file makes the FS walk and extend its FAT
@@ -238,14 +258,16 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
      first-boot extraction was running at a fraction of the card's actual
      write speed and taking many minutes. Best-effort: if the FS declines,
      the writes below still work, they're just back to being slow. */
-  if (ftruncate(fileno(out), (off_t)raw_len) == 0) rewind(out);
+  file_prealloc(out, (off_t)raw_len);
 
-  static uint8_t inbuf[64 * 1024], outbuf[256 * 1024];
+  /* FSA alignment */
+  static uint8_t inbuf[64 * 1024]   __attribute__((aligned(64)));
+  static uint8_t outbuf[256 * 1024] __attribute__((aligned(64)));
   uint32_t in_left = gz_len, done = 0, last_mb = 0;
   bool ok = true;
   fseek(f, gz_off, SEEK_SET);
-  term_printf("First boot: extracting rootfs.ext2 (%luMB) to SD...\n",
-              (unsigned long)(raw_len >> 20));
+  term_printf("First boot: extracting rootfs (%luMB) to\n  %s...\n",
+              (unsigned long)(raw_len >> 20), kRootfsPath);
   PresentTopScreen(present_tick);
 
   int zret = Z_OK;
@@ -280,7 +302,7 @@ static bool ExtractEmbeddedRootfs(FILE *f, long gz_off, uint32_t gz_len, uint32_
      a zero-byte or otherwise broken leftover would also do. */
   remove(kRootfsPath);
   if (rename(kRootfsPart, kRootfsPath) != 0) {
-    term_printf("Could not finalize rootfs.ext2 on the SD card.\n");
+    term_printf("Could not finalize %s\n", kRootfsPath);
     remove(kRootfsPart);
     return false;
   }
@@ -413,14 +435,24 @@ static inline bool PromptDownloadImage(uint64_t *present_tick) {
 #define SWAP_SIZE_BYTES  (64u * 1024u * 1024u)
 
 static FILE *CreateSwapFile(uint64_t *present_tick) {
+#ifdef PLAT_FS_ZERO_FILLS
+  FILE *k = fopen(SWAP_PATH, "r+b");
+  if (k) {
+    fseek(k, 0, SEEK_END);
+    if ((uint64_t)ftell(k) == SWAP_SIZE_BYTES) { rewind(k); return k; }
+    fclose(k);
+  }
+#endif
   FILE *f = fopen(SWAP_PATH, "w+b");
   if (!f) return NULL;
 
+#ifndef PLAT_FS_ZERO_FILLS
   if (fseek(f, (long)SWAP_SIZE_BYTES - 1, SEEK_SET) == 0 && fputc(0, f) != EOF) {
     fflush(f);
     fseek(f, 0, SEEK_END);
     if ((uint64_t)ftell(f) == SWAP_SIZE_BYTES) { rewind(f); return f; }
   }
+#endif
 
   /* Sparse extend didn't take: write the whole thing out, with progress,
      the same way the first-boot rootfs extraction reports itself. Small
@@ -462,7 +494,9 @@ static FILE *swap_file = NULL;
 
 static void CloseSwapFile(void) {
   if (swap_file) { fclose(swap_file); swap_file = NULL; }
+#ifndef PLAT_FS_ZERO_FILLS
   remove(SWAP_PATH);
+#endif
 }
 
 static uint32_t HandleException(uint32_t ir, uint32_t retval);
@@ -912,11 +946,13 @@ int main(int argc, char **argv) {
   /* A reset asked for in a previous session lands here, before anything opens
      the disk - the settings page cannot unlink rootfs.ext2 while the
      emulation thread has it open. */
+  ResolveRootfsPath(&g_cfg);
+
   if (g_cfg.reset_rootfs) {
     g_cfg.reset_rootfs = false;
     cfg_save(&g_cfg);
     if (have_bundle) {
-      remove(PLAT_SD "rootfs.ext2");
+      remove(g_rootfs_path);
       term_printf("Resetting guest state: rootfs will be re-extracted.\n");
     } else {
       /* The row is unreachable without a bundle, but a hand-edited config
@@ -934,8 +970,12 @@ int main(int argc, char **argv) {
       disk_file = OpenDiskFile(&disk_path);
   }
   if (!disk_file) {
-    term_printf("Error: Could not open rootfs.ext2.\n");
-    term_printf("Please copy rootfs.ext2 to " PLAT_SD "\n");
+    term_printf("Error: Could not open %s\n", disk_path);
+    if (g_rootfs_custom)
+      term_printf("That is rootfs_path in " CFG_PATH ".\n"
+                  "Is the drive connected?\n");
+    else
+      term_printf("Please copy rootfs.ext2 to " PLAT_SD "\n");
     fclose(f);
     goto wait_exit;
   }

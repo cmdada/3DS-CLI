@@ -459,8 +459,11 @@ static void settings_run_action(int act) {
       /* reset_rootfs is a pending request, not a preference - clearing it
          would cancel a reset the user already confirmed. */
       bool pending = g_cfg.reset_rootfs;
+      char rootfs_path[sizeof(g_cfg.rootfs_path)];
+      memcpy(rootfs_path, g_cfg.rootfs_path, sizeof(rootfs_path));
       cfg_defaults(&g_cfg);
       g_cfg.reset_rootfs = pending;
+      memcpy(g_cfg.rootfs_path, rootfs_path, sizeof(rootfs_path));
       settings_apply_live();
       cfg_save(&g_cfg);
       snprintf(settings_toast, sizeof(settings_toast), "Defaults restored");

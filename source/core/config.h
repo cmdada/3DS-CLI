@@ -47,9 +47,11 @@ typedef struct {
   /* Set by the settings page, consumed and cleared by the next boot: the page
      cannot unlink rootfs.ext2 while the emulator thread has it open. */
   bool reset_rootfs;
+
+  char rootfs_path[160];  /* empty = SD */
 } Cfg;
 
-typedef enum { CFG_BOOL, CFG_INT, CFG_HEX32 } CfgType;
+typedef enum { CFG_BOOL, CFG_INT, CFG_HEX32, CFG_STR } CfgType;
 
 typedef struct {
   const char *key;
@@ -87,6 +89,7 @@ static const CfgField cfg_fields[] = {
   CFG_F(install_id,    CFG_HEX32, 0, 0),
 
   CFG_F(reset_rootfs,  CFG_BOOL, 0, 1),
+  CFG_F(rootfs_path,   CFG_STR,  0, (int)sizeof(((Cfg *)0)->rootfs_path)),
 };
 
 #define CFG_NFIELDS ((int)(sizeof(cfg_fields) / sizeof(cfg_fields[0])))
@@ -128,6 +131,7 @@ static inline void cfg_defaults(Cfg *c) {
   c->install_id[0] = '\0';    /* minted on the first launch that pings      */
 
   c->reset_rootfs  = false;
+  c->rootfs_path[0] = '\0';
 }
 
 static inline char *cfg_trim(char *s) {
@@ -147,7 +151,7 @@ static inline void cfg_load(Cfg *c) {
   FILE *f = fopen(CFG_PATH, "r");
   if (!f) return;
 
-  char line[128];
+  char line[256];
   while (fgets(line, sizeof(line), f)) {
     char *p = cfg_trim(line);
     if (*p == '\0' || *p == '#') continue;
@@ -169,6 +173,11 @@ static inline void cfg_load(Cfg *c) {
         int n = 0;
         while (n < 33 && val[n] && strchr("0123456789abcdefABCDEF", val[n])) n++;
         if (n == 32) { memcpy(cfg_strp(c, fd), val, 32); cfg_strp(c, fd)[32] = '\0'; }
+        break;
+      }
+      if (fd->type == CFG_STR) {
+        /* no truncating */
+        if (strlen(val) < (size_t)fd->hi) strcpy(cfg_strp(c, fd), val);
         break;
       }
 
@@ -197,7 +206,7 @@ static inline bool cfg_save(const Cfg *c) {
   for (int i = 0; i < CFG_NFIELDS; i++) {
     const CfgField *fd = &cfg_fields[i];
     Cfg *m = (Cfg *)c;  /* the accessors are shared with the mutable path */
-    if (fd->type == CFG_HEX32) {
+    if (fd->type == CFG_HEX32 || fd->type == CFG_STR) {
       fprintf(f, "%s=%s\n", fd->key, cfg_strp(m, fd));
       continue;
     }

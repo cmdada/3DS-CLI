@@ -259,7 +259,8 @@ bool plat_net_init(void) {
 void plat_net_exit(void) {
   if (!soc_buf) return;
   socExit();
-  soc_buf = NULL;   /* linearFree'd by socExit */
+  free(soc_buf);
+  soc_buf = NULL;
 }
 
 /* --------------------------------------------------------------- entropy -- */

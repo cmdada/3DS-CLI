@@ -17,7 +17,10 @@
 #include <coreinit/time.h>
 #include <coreinit/mutex.h>
 #include <nn/ac.h>
+#include <coreinit/title.h>
 #include <nsyskbd/nsyskbd.h>
+#include <proc_ui/procui.h>
+#include <sysapp/launch.h>
 #include <vpad/input.h>
 #include <whb/proc.h>
 #include <whb/sdcard.h>
@@ -78,6 +81,23 @@ static size_t cafe_probe(cafe_screen *s, uint32_t x, uint32_t y, size_t limit) {
   return (size_t)-1;
 }
 
+/* which buffer is next */
+static void cafe_find_parity(cafe_screen *s) {
+  uint32_t save[2];
+  memcpy(&save[0], s->origin[0], 4);
+  memcpy(&save[1], s->origin[1], 4);
+  memset(s->origin[0], 0, 4);
+  memset(s->origin[1], 0, 4);
+  OSScreenPutPixelEx(s->id, 0, 0, 0xffffff00);
+  uint32_t a;
+  memcpy(&a, s->origin[0], 4);
+  s->parity = a ? 0 : 1;
+  memcpy(s->origin[0], &save[0], 4);
+  memcpy(s->origin[1], &save[1], 4);
+  DCFlushRange(s->origin[0], 4);
+  DCFlushRange(s->origin[1], 4);
+}
+
 static bool cafe_screen_init(cafe_screen *s, OSScreenID id, int w, int h) {
   s->id = id; s->w = w; s->h = h;
   s->size = OSScreenGetBufferSizeEx(id);
@@ -108,14 +128,14 @@ static bool cafe_screen_init(cafe_screen *s, OSScreenID id, int w, int h) {
     /* Both buffers live in the one area, the second right after the first:
        OSScreenGetBufferSizeEx returns room for the pair, and the measured row
        stride accounts for exactly half of it. */
-    s->origin[1] = s->mem + s->size / 2;
+    s->origin[1] = s->origin[0] + s->size / 2;
     s->probed = true;
   }
-  s->parity = 0;
 
   OSScreenClearBufferEx(id, 0);
   OSScreenFlipBuffersEx(id);
   OSScreenClearBufferEx(id, 0);
+  cafe_find_parity(s);
   return true;
 }
 
@@ -175,7 +195,13 @@ static void cafe_present_panel(void) {
   }
 }
 
+static bool cafe_fg = true;
+static bool cafe_reacquired;
+static bool proc_running = true;
+static bool from_hbl;
+
 void plat_present(unsigned mask) {
+  if (!cafe_fg) return;  /* backgrounded */
   if (mask & PLAT_SURF_BIT(PLAT_SURF_TERM)) {
     cafe_flush(&scr_tv);
     OSScreenFlipBuffersEx(SCREEN_TV);
@@ -191,13 +217,55 @@ void plat_present(unsigned mask) {
 
 /* ----------------------------------------------------------------- life -- */
 
+static uint32_t cafe_on_release(void *ctx) {
+  (void)ctx;
+  cafe_fg = false;
+  return 0;
+}
+
+static uint32_t cafe_on_acquire(void *ctx) {
+  (void)ctx;
+  OSScreenSetBufferEx(SCREEN_TV, scr_tv.mem);
+  OSScreenSetBufferEx(SCREEN_DRC, scr_drc.mem);
+  cafe_fg = true;
+  cafe_reacquired = true;
+  return 0;
+}
+
+static void cafe_restore_screens(void) {
+  int drawn = scr_tv.parity;  /* newest frame */
+  cafe_find_parity(&scr_tv);
+  cafe_find_parity(&scr_drc);
+
+  size_t span = scr_tv.size / 2 - (size_t)(scr_tv.origin[0] - scr_tv.mem);
+  if (scr_tv.parity != drawn)
+    memcpy(scr_tv.origin[scr_tv.parity], scr_tv.origin[drawn], span);
+  DCFlushRange(scr_tv.origin[scr_tv.parity], span);
+  OSScreenFlipBuffersEx(SCREEN_TV);
+  scr_tv.parity ^= 1;
+
+  plat_present(PLAT_SURF_BIT(PLAT_SURF_PANEL));
+  g_emu_rebase_clock = true;
+}
+
+static bool cafe_launched_from_hbl(void) {
+  uint64_t t = OSGetTitleID();
+  return t == 0x0005000013374842ull ||   /* Homebrew Launcher */
+         t == 0x000500101004A000ull ||   /* Mii Maker */
+         t == 0x000500101004A100ull ||
+         t == 0x000500101004A200ull;
+}
+
 /* Defined with the rest of the keyboard, below; KBDSetup wants them here. */
 static void cafe_kbd_attach(KBDAttachEvent *e);
 static void cafe_kbd_detach(KBDAttachEvent *e);
 static void cafe_kbd_key(KBDKeyEvent *e);
 
 bool plat_init(void) {
+  from_hbl = cafe_launched_from_hbl();
   WHBProcInit();
+  ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, cafe_on_acquire, NULL, 100);
+  ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE, cafe_on_release, NULL, 100);
   /* Nothing else mounts it: WHBProcInit brings up the process, not the
      filesystem, and every path the app touches lives on the card. */
   WHBMountSdCard();
@@ -240,15 +308,38 @@ bool plat_init(void) {
   return true;
 }
 
+static bool net_up;
+
 void plat_exit(void) {
   KBDTeardown();
-  if (caps.net) ACFinalize();
-  OSScreenShutdown();
+  if (net_up) { ACFinalize(); net_up = false; }
+  if (cafe_fg) OSScreenShutdown();
   WHBUnmountSdCard();
+
+  /* ProcUI exit */
+  if (proc_running) {
+    if (from_hbl) {
+      WHBProcStopRunning();
+      WHBProcIsRunning();
+    } else {
+      SYSLaunchMenu();
+      while (WHBProcIsRunning()) {}
+    }
+    proc_running = false;
+  }
   WHBProcShutdown();
 }
 
-bool plat_running(void) { return WHBProcIsRunning(); }
+/* latched */
+bool plat_running(void) {
+  if (!proc_running) return false;
+  proc_running = WHBProcIsRunning();
+  if (proc_running && cafe_reacquired) {
+    cafe_reacquired = false;
+    cafe_restore_screens();
+  }
+  return proc_running;
+}
 
 const plat_caps_t *plat_caps(void) { return &caps; }
 const char *plat_model(void) {
@@ -433,12 +524,16 @@ void plat_mutex_unlock(plat_mutex_t *m) { OSUnlockMutex((OSMutex *)m); }
 /* ------------------------------------------------------------------ net -- */
 
 bool plat_net_init(void) {
+  if (net_up) return true;
   if (!NNResult_IsSuccess(ACInitialize())) return false;
   if (!NNResult_IsSuccess(ACConnect())) { ACFinalize(); return false; }
+  net_up = true;
   return true;
 }
 
-void plat_net_exit(void) { ACFinalize(); }
+void plat_net_exit(void) {
+  if (net_up) { ACFinalize(); net_up = false; }
+}
 
 /* -------------------------------------------------------------- entropy -- */
 

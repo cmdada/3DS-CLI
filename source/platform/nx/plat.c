@@ -93,7 +93,6 @@ bool plat_init(void) {
 }
 
 void plat_exit(void) {
-  if (caps.net) socketExit();
   framebufferClose(&nx_fb);
 }
 

@@ -43,12 +43,15 @@ void pkbd_update(const plat_input_t *in) {
   if (ctrOskUpdate(&g_osk, &p, &ev)) rx_push((char)ev.byte);
 }
 
+/* separate screen */
 void pkbd_draw(void) {
+  if (!g_osk.dirty) return;
   plat_fb_t fb;
   if (!plat_surface(PLAT_SURF_PANEL, &fb)) return;
   /* OSScreen stores red first; see PLAT_PIXEL_RGB in plat_cfg.h. */
   CtrOskSurface dst = { fb.base, fb.w, fb.h, fb.x_stride, fb.y_stride, 1 };
   ctrOskDraw(&g_osk, &dst);
+  plat_present(PLAT_SURF_BIT(PLAT_SURF_PANEL));
 }
 
 #endif /* PLAT_KBD_H */

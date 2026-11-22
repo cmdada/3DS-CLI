@@ -17,9 +17,8 @@
 #else
 #define PLAT_NAME        "GameCube"
 #define PLAT_SLUG        "gamecube"
-/* An SD Gecko in memory card slot A. A memory card cannot hold a ~200MB
-   rootfs, so there is no other option on this console. */
-#define PLAT_SD          "carda:/"
+/* SD2SP2 or SD Gecko */
+#define PLAT_SD          "/"
 /* 24MB of MEM1, less the app, the framebuffers and the terminal's scratch.
    This is below what the guest kernel needs to boot - see the size check in
    machine.c - so the GameCube is expected to report the Image as too large
@@ -56,6 +55,9 @@
 /* The scratch the terminal and panel are drawn into is plain BGRA; the
    framebuffer the video block scans is YUY2, and plat_present converts. */
 #define PLAT_FS_NEEDS_ALIGNED_IO
+
+/* libfat */
+#define PLAT_FS_ZERO_FILLS
 
 /* 640x288 at the 8x8 font. */
 #define TERM_COLS        80

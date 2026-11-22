@@ -15,7 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <unistd.h>   /* ftruncate, for preallocating the download */
+#include "prealloc.h"
 
 #include "plat.h"
 
@@ -60,7 +60,7 @@ static int dl_on_progress(void *ud, curl_off_t total, curl_off_t got,
      Best-effort: if the filesystem declines, the writes still work. */
   if (!s->sized && total > 0) {
     s->sized = true;
-    ftruncate(fileno(s->out), (off_t)total);
+    file_prealloc(s->out, (off_t)total);
   }
 
   if (!s->cb) return 0;

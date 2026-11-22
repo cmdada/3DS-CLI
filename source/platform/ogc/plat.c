@@ -164,6 +164,9 @@ bool plat_init(void) {
 }
 
 void plat_exit(void) {
+#ifdef HW_RVL
+  KEYBOARD_Deinit();
+#endif
   if (scratch) { free(scratch); scratch = NULL; }
   VIDEO_SetBlack(TRUE);
   VIDEO_Flush();

@@ -54,6 +54,14 @@ The GameCube needs an SD Gecko or SD2SP2: the rootfs is ~200MB and a memory
 card cannot hold it. It also has the least RAM of them all, so it is the
 tightest fit.
 
+The rootfs can live somewhere other than the card. Set `rootfs_path` in
+`3ds-cli.cfg` (next to `Image`) to a full path, or to a directory ending in
+`/`, and the first boot extracts `rootfs.ext2` there instead. The directory
+has to exist already. `Image` and the config stay where they were. This only
+reaches drives the console's homebrew stack already mounts: `usb:/` on the
+Wii, `/dev_usb000/` on the PS3, `uma0:` or `imc0:` on the Vita, `ef0:/` on a
+PSP Go. The 3DS, Switch and Wii U mount nothing but the SD card.
+
 The PS3 is the one console here with no removable card: its files live on the
 internal drive under `/dev_hdd0/3ds-cli/`, which is easiest to fill over FTP.
 It needs a display that can do 720p, because that is the only mode the terminal
